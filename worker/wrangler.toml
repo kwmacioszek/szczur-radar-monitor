@@ -1,0 +1,13 @@
+# Cloudflare Worker: Railway webhook -> GitHub workflow_dispatch (verify.yml).
+# Secrets are never stored here; set them with:
+#   npx wrangler secret put WEBHOOK_SECRET
+#   npx wrangler secret put GITHUB_DISPATCH_TOKEN
+# For `wrangler dev`, put them in worker/.dev.vars (git-ignored).
+name = "szczur-radar-monitor"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Placeholders: replace before `wrangler deploy` (public values, not secrets).
+RAILWAY_PROJECT_ID = "00000000-0000-0000-0000-000000000000"
+GITHUB_REPO = "kwmacioszek/szczur-radar-monitor"

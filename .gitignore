@@ -1,0 +1,17 @@
+# Node / Worker
+node_modules/
+.wrangler/
+dist/
+coverage/
+
+# Local secrets (never commit)
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+*.log
