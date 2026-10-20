@@ -123,6 +123,30 @@ Lokalnie (`wrangler dev`): sekrety w `worker/.dev.vars` (ignorowany przez git), 
 WEBHOOK_SECRET=lokalny-sekret
 ```
 
+## Uruchomienie
+
+Jednorazowo, przez operatora (albo agenta na jego wyraźne polecenie). Żaden sekret nie trafia do
+repo ani do logów.
+
+1. **Repo**: `kwmacioszek/szczur-radar-monitor`, publiczne. Na `main` ruleset: bez force-push i
+   usuwania, zmiany tylko przez PR. Runy z forków wymagają zatwierdzenia (wszyscy zewnętrzni
+   kontrybutorzy), domyślne uprawnienia `GITHUB_TOKEN` tylko do odczytu.
+2. **Środowisko GitHub `monitor`**: deployment branches tylko `main`, sekret `RAILWAY_API_TOKEN`
+   (dedykowany token workspace Railway, osobny od tokena CI szczur-radar):
+   `gh secret set RAILWAY_API_TOKEN --env monitor --repo kwmacioszek/szczur-radar-monitor`
+   (wartość z promptu, nie z argumentu).
+3. **Zmienne repo**: `RAILWAY_PROJECT_ID`, `READINESS_SERVICES`
+   (`szczur-radar-api,szczur-radar-web`), `MONITOR_ASSIGNEE` (login operatora).
+4. **Worker**: `cd worker && npx wrangler login`, potem `npx wrangler deploy` i sekrety
+   `npx wrangler secret put WEBHOOK_SECRET` (losowe, ≥32 bajty) oraz
+   `npx wrangler secret put GITHUB_DISPATCH_TOKEN` (fine-grained PAT: tylko to repo,
+   Actions: read and write, z datą wygaśnięcia).
+5. **Webhook Railway** na projekcie szczur-radar: URL `https://<worker>.workers.dev/railway`,
+   nagłówek `X-Monitor-Secret` = `WEBHOOK_SECRET`, PR envy włączone, zdarzenia `Deployment.*`
+   przekazywane przez Worker. To jedyna zmiana w projekcie Railway.
+
+Wycofanie: wyłącz lub usuń webhook w Railway; Worker i repo mogą zostać.
+
 ## Sekrety i uprawnienia
 
 | Nazwa | Gdzie | Uprawnienia |

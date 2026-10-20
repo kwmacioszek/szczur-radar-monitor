@@ -8,6 +8,6 @@ main = "src/index.ts"
 compatibility_date = "2026-10-01"
 
 [vars]
-# Placeholders: replace before `wrangler deploy` (public values, not secrets).
-RAILWAY_PROJECT_ID = "00000000-0000-0000-0000-000000000000"
+# Public values, not secrets: the szczur-radar Railway project and this repository.
+RAILWAY_PROJECT_ID = "decf00e4-f5a4-43df-b338-6698be87c5a1"
 GITHUB_REPO = "kwmacioszek/szczur-radar-monitor"
