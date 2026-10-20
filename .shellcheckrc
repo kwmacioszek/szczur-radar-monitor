@@ -1,0 +1,3 @@
+# shellcheck configuration: verifier/*.sh source lib.sh next to them.
+source-path=SCRIPTDIR
+external-sources=true

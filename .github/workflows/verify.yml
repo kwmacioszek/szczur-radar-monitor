@@ -1,0 +1,75 @@
+# Judges one deploy of one Railway service of szczur-radar (see README.md). Dispatched only by the
+# Worker (worker/), one run per final deployment event, or by hand with the same inputs (a lost
+# webhook). The only workflow with a secret: it runs in the environment "monitor", which only main
+# may use, and has no trigger a fork or a pull request can fire.
+name: verify
+run-name: verify ${{ inputs.environment_name }} / ${{ inputs.service_name }} (${{ inputs.event_type }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: Railway event (Deployment.deployed, redeployed, failed, crashed, oom_killed)
+        required: true
+        type: string
+      environment_id:
+        description: Railway environment ID (UUID)
+        required: true
+        type: string
+      environment_name:
+        description: Railway environment name, e.g. production or szczur-radar-pr-<N>
+        required: true
+        type: string
+      service_name:
+        description: Railway service that deployed, e.g. szczur-radar-api
+        required: true
+        type: string
+      deployment_id:
+        description: Railway deployment ID from the webhook (UUID)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+# One queue per environment: the runs of one environment never race on its issues. queue: max keeps
+# up to 100 waiting runs instead of cancelling all but one; never cancel-in-progress (every final
+# event of every service gets its verdict).
+concurrency:
+  group: env-${{ inputs.environment_id }}
+  queue: max
+
+jobs:
+  verify:
+    name: verify ${{ inputs.environment_name }} / ${{ inputs.service_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: monitor
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the Railway CLI
+        run: npm install --global @railway/cli@5.67.1 && railway --version
+      - name: Verify the deploy
+        # The dispatch inputs reach the script only through env (validated again there), never
+        # interpolated into the script.
+        env:
+          EVENT_TYPE: ${{ inputs.event_type }}
+          ENVIRONMENT_ID: ${{ inputs.environment_id }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          READINESS_SERVICES: ${{ vars.READINESS_SERVICES }}
+          MONITOR_ASSIGNEE: ${{ vars.MONITOR_ASSIGNEE }}
+          GH_TOKEN: ${{ github.token }}
+        run: verifier/verify.sh >> "$GITHUB_STEP_SUMMARY"

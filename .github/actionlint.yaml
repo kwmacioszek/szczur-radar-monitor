@@ -1,0 +1,9 @@
+# actionlint configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md).
+paths:
+  .github/workflows/verify.yml:
+    ignore:
+      # actionlint (up to 1.7.12) does not know the concurrency key `queue` yet. GitHub added it on
+      # 2026-05-07: https://github.blog/changelog/2026-05-07-github-actions-concurrency-groups-now-allow-larger-queues
+      # verify.yml needs `queue: max` so that no deploy event of an environment is cancelled while
+      # another run of that environment waits. Remove this once actionlint knows the key.
+      - 'unexpected key "queue" for "concurrency" section'

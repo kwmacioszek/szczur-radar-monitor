@@ -9,10 +9,11 @@ Repo jest publiczne. Nie zawiera żadnych sekretów: sekrety żyją wyłącznie 
 | --- | --- | --- | --- |
 | `WEBHOOK_SECRET` | sekret Workera; nagłówek `X-Monitor-Secret` webhooka Railway | brak, tylko uwierzytelnienie webhooka | ktoś może wysłać fałszywe zdarzenie; Worker i tak przyjmie tylko projekt szczur-radar i poprawne pola, a run tylko czyta stan z Railway |
 | `GITHUB_DISPATCH_TOKEN` | sekret Workera | fine-grained PAT: tylko repo `szczur-radar-monitor`, **Actions: write**, nic więcej, z datą wygaśnięcia | uruchamianie i anulowanie runów monitora |
-| `RAILWAY_API_TOKEN` | sekret środowiska GitHub `monitor` (dostępny tylko z `main`) | dedykowany token workspace Railway (Railway nie ma tokenów tylko do odczytu; token projektu obejmuje jedno środowisko) | dostęp do workspace Railway; dlatego tylko w chronionym środowisku |
-| `GITHUB_TOKEN` | automatyczny token runu | `contents: read`, `issues: write`, jawnie w workflow | wygasa z końcem runu |
+| `RAILWAY_API_TOKEN` | sekret środowiska GitHub `monitor`, którego deployment branches to tylko `main`; czyta go wyłącznie `verify.yml` (`secrets.RAILWAY_API_TOKEN` w `env:` jednego kroku) | dedykowany token workspace Railway (Railway nie ma tokenów tylko do odczytu; token projektu obejmuje jedno środowisko, a monitor obserwuje też PR envy) | dostęp do workspace Railway; dlatego tylko w chronionym środowisku, nigdy w `ci.yml` |
+| `GITHUB_TOKEN` | automatyczny token runu | `verify.yml`: `contents: read`, `issues: write` (issue `deploy-health` w tym repo); `ci.yml`: tylko `contents: read`; jawnie w każdym workflow | wygasa z końcem runu |
 
-`RAILWAY_PROJECT_ID` i `GITHUB_REPO` (`worker/wrangler.toml`) to wartości publiczne.
+`RAILWAY_PROJECT_ID` i `GITHUB_REPO` (`worker/wrangler.toml`) oraz zmienne repo
+`RAILWAY_PROJECT_ID`, `READINESS_SERVICES` i `MONITOR_ASSIGNEE` to wartości publiczne.
 
 Zasady:
 
@@ -21,6 +22,10 @@ Zasady:
 - Worker przekazuje do GitHub tylko pięć zwalidowanych pól (UUID dla id, `[a-z0-9-]{1,64}` dla
   nazw); skrypt weryfikacji waliduje je ponownie i dostaje je wyłącznie przez `env:`.
 - Lokalne sekrety (`worker/.dev.vars`, `.env`) są w `.gitignore`.
+- `verify.sh` nie wypisuje tokenów; raport w podsumowaniu runu i w issue zawiera tylko środowisko,
+  usługę, zdarzenie, stan, wyniki sond i link do runu. `railway` dostaje środowisko przez ID
+  (`-p`, `-e`), nigdy przez `railway link`.
+- `actions/checkout` z `persist-credentials: false`: token runu nie zostaje w `.git/config`.
 
 ## Ochrona publicznego repo
 
@@ -30,7 +35,10 @@ Zasady:
   `pull_request_target`.
 - `main` chroniony rulesetem: bez force-push, zmiany tylko przez PR.
 - Runy workflow z forków wymagają zatwierdzenia.
-- Akcje przypięte po SHA; `permissions` jawne na górze każdego workflow.
+- Akcje przypięte po pełnym SHA commita (z komentarzem wersji); `railway` CLI przypięte do wersji;
+  `permissions` jawne na górze każdego workflow i w jobie `verify`.
+- Wejścia `workflow_dispatch` trafiają do skryptu wyłącznie przez `env:`, nigdy przez interpolację
+  w `run:`.
 
 ## Rotacja
 
