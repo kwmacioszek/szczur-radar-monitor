@@ -13,12 +13,13 @@
 #      ignored, the list sorted by createdAt; no deployment; an unknown state; /api/ready 503 for the
 #      whole window (RED) or until it wakes (GREEN); GET / without text/html or without /assets/ (RED);
 #      an environment without a known web address (RED);
-#   3. the issue of the environment and service: RED opens one (title, label, assignee) or comments
-#      on the open one; szczur-radar-pr-8 / szczur-radar-api never matches szczur-radar-pr-81 /
-#      szczur-radar-api (nor a pull request); GREEN comments on and closes that service's issue, leaves
-#      another service's open, and without one only reads the list;
+#   3. the issue of the service (production only): RED opens one (title, label, assignee) or comments
+#      on the open one; production / szczur-radar-api never matches pre-production / szczur-radar-api
+#      (nor a pull request); GREEN comments on and closes that service's issue, leaves another
+#      service's open, and without one only reads the list;
 #   4. the operator's alert: a red run of production checks in /fail with its summary, then a success, to
-#      HEALTHCHECK_PING_URL; a PR env or a green run does not; healthchecks.io failing changes nothing;
+#      HEALTHCHECK_PING_URL; a PR env (no issue either) or a green run does not; healthchecks.io failing
+#      changes nothing;
 #   5. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
 #      failing (exit 1), a hung railway or gh call stopped after CLI_TIMEOUT, a missing or bad variable
 #      (exit 2).
@@ -305,7 +306,7 @@ readonly repo=example/szczur-radar-monitor
 readonly list_call="api repos/$repo/issues?labels=deploy-health&state=open&per_page=100"
 
 # Case $1: verify.sh with the variables after it (NAME=value; by default Deployment.deployed of
-# szczur-radar-api in szczur-radar-pr-8, run 4242, short limits) must exit with $2. Every input of the
+# szczur-radar-api in production, run 4242, short limits) must exit with $2. Every input of the
 # caller is dropped first. Its stdout goes to $tmp/$1.out, its log to $tmp/$1.log, the stubs' calls
 # to $tmp/$1.railway/ and $tmp/$1.gh/.
 run_verify() {
@@ -318,7 +319,7 @@ run_verify() {
         -u CLI_TIMEOUT -u HEALTHCHECK_PING_URL \
         PATH="$tmp/bin:$PATH" RAILWAY_STUB="$tmp/$name.railway" GH_STUB="$tmp/$name.gh" \
         STUB_PROJECT_ID=$project_id STUB_ENVIRONMENT_ID=$environment_id \
-        EVENT_TYPE=Deployment.deployed ENVIRONMENT_ID=$environment_id ENVIRONMENT_NAME=szczur-radar-pr-8 \
+        EVENT_TYPE=Deployment.deployed ENVIRONMENT_ID=$environment_id ENVIRONMENT_NAME=production \
         SERVICE_NAME=szczur-radar-api DEPLOYMENT_ID=$deployment_id RAILWAY_API_TOKEN=stub-railway-token \
         RAILWAY_PROJECT_ID=$project_id MONITOR_ASSIGNEE=operator GH_TOKEN=stub-gh-token \
         GITHUB_REPOSITORY=$repo GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=4242 \
@@ -353,13 +354,13 @@ step "2. the verdict: the state of the service that deployed, and the probes of 
 for status in SUCCESS SLEEPING; do
     railway_answers "api-$status" szczur-radar-api "$(only a1 "$status")"
     verify_case "api-$status" 0 ""
-    out_says "api-$status" '### Zdrowe wdrożenie: `szczur-radar-pr-8` / `szczur-radar-api`'
+    out_says "api-$status" '### Zdrowe wdrożenie: `production` / `szczur-radar-api`'
     out_says "api-$status" "| Stan deployu | **$status** |"
     out_says "api-$status" '| `/api/ready` | HTTP 200 |'
     out_says "api-$status" '| `/healthz` | HTTP 200 |'
     out_says "api-$status" '| `/` | HTTP 200, text/html z /assets/ |'
     out_says "api-$status" '| Run | https://github.com/example/szczur-radar-monitor/actions/runs/4242 |'
-    run_says "api-$status" '::notice::verify: szczur-radar-pr-8 / szczur-radar-api is healthy'
+    run_says "api-$status" '::notice::verify: production / szczur-radar-api is healthy'
     web_requests_were "api-$status" 3
     railway_asked_only "api-$status" szczur-radar-api
     grep -qF -- "deployment list --json --limit 50 -s szczur-radar-api -p $project_id -e $environment_id" \
@@ -369,10 +370,10 @@ pass "api SUCCESS or SLEEPING, /api/ready, /healthz and / pass: GREEN, exit 0 (r
 
 railway_answers api-failed szczur-radar-api "$(deployments "a2 FAILED 2026-10-20T10:05:00.000Z" "a1 SUCCESS 2026-10-20T10:00:00.000Z")"
 verify_case api-failed 1 ""
-out_says api-failed '### Niezdrowe wdrożenie: `szczur-radar-pr-8` / `szczur-radar-api`'
+out_says api-failed '### Niezdrowe wdrożenie: `production` / `szczur-radar-api`'
 out_says api-failed '| Stan deployu | **FAILED** |'
 out_says api-failed '| Najnowszy deploy (Railway) | `a2` |'
-run_says api-failed '::error::verify: szczur-radar-pr-8 / szczur-radar-api is unhealthy after Deployment.deployed'
+run_says api-failed '::error::verify: production / szczur-radar-api is unhealthy after Deployment.deployed'
 web_requests_were api-failed 0
 pass "api FAILED while the old deployment still serves (probes would answer 200): RED, exit 1, no probe"
 
@@ -381,7 +382,7 @@ railway_answers web-cron-crashed pipeline-trigger "$(only t1 CRASHED)"
 railway_answers web-cron-crashed db-backup "$(only b1 CRASHED)"
 verify_case web-cron-crashed 0 "" SERVICE_NAME=szczur-radar-web
 railway_asked_only web-cron-crashed szczur-radar-web
-out_says web-cron-crashed '### Zdrowe wdrożenie: `szczur-radar-pr-8` / `szczur-radar-web`'
+out_says web-cron-crashed '### Zdrowe wdrożenie: `production` / `szczur-radar-web`'
 pass "a web deploy while the crons are CRASHED: GREEN, the crons' state never read"
 
 railway_answers cron-crashed pipeline-trigger "$(only t1 CRASHED)"
@@ -480,12 +481,12 @@ verify_case custom-readiness 0 "" SERVICE_NAME=worker READINESS_SERVICES="szczur
 web_requests_were custom-readiness 3
 pass "a readiness service in an environment without a web address: RED; READINESS_SERVICES chooses the probed services"
 
-step "3. the issue of the environment and service"
+step "3. the issue of the service (production only)"
 railway_answers red-new szczur-radar-api "$(only a2 FAILED)"
-open_issues red-new '[{"number": 7, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-web"}]'
+open_issues red-new '[{"number": 7, "title": "Niezdrowe wdrożenie: production / szczur-radar-web"}]'
 verify_case red-new 1 ""
 gh_calls_are red-new "label create deploy-health --repo $repo --force" "$list_call" \
-    "issue create --repo $repo --title Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api --label deploy-health --assignee operator --body-file "
+    "issue create --repo $repo --title Niezdrowe wdrożenie: production / szczur-radar-api --label deploy-health --assignee operator --body-file "
 body_says red-new '| Stan deployu | **FAILED** |'
 body_says red-new '| Zdarzenie | `Deployment.deployed`, deploy `00000000-0000-4000-8000-0000000000d1` |'
 run_says red-new '::notice::verify: opened https://github.com/example/szczur-radar-monitor/issues/101'
@@ -493,9 +494,9 @@ pass "RED without an issue of the service (another service's open): a new one, l
 
 railway_answers red-comment szczur-radar-api "$(only a2 CRASHED)"
 open_issues red-comment '[
-    {"number": 12, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api"},
-    {"number": 9, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api"},
-    {"number": 5, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api", "pull_request": {}}]'
+    {"number": 12, "title": "Niezdrowe wdrożenie: production / szczur-radar-api"},
+    {"number": 9, "title": "Niezdrowe wdrożenie: production / szczur-radar-api"},
+    {"number": 5, "title": "Niezdrowe wdrożenie: production / szczur-radar-api", "pull_request": {}}]'
 verify_case red-comment 1 ""
 gh_calls_are red-comment "label create deploy-health" "$list_call" "issue comment 9 --repo $repo --body-file "
 body_says red-comment '| Stan deployu | **CRASHED** |'
@@ -503,23 +504,23 @@ pass "RED with open issues of the service: a comment on the oldest (a pull reque
 
 railway_answers whole-word szczur-radar-api "$(only a2 FAILED)"
 open_issues whole-word '[
-    {"number": 3, "title": "Niezdrowe wdrożenie: szczur-radar-pr-81 / szczur-radar-api"},
-    {"number": 4, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api-x"}]'
+    {"number": 3, "title": "Niezdrowe wdrożenie: pre-production / szczur-radar-api"},
+    {"number": 4, "title": "Niezdrowe wdrożenie: production / szczur-radar-api-x"}]'
 verify_case whole-word 1 ""
-gh_calls_are whole-word "label create deploy-health" "$list_call" "issue create --repo $repo --title Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api "
-pass "szczur-radar-pr-8 / szczur-radar-api matches neither szczur-radar-pr-81 / szczur-radar-api nor … / szczur-radar-api-x"
+gh_calls_are whole-word "label create deploy-health" "$list_call" "issue create --repo $repo --title Niezdrowe wdrożenie: production / szczur-radar-api "
+pass "production / szczur-radar-api matches neither pre-production / szczur-radar-api nor … / szczur-radar-api-x"
 
 railway_answers green-close szczur-radar-api "$(only a3 SUCCESS)"
-open_issues green-close '[{"number": 3, "title": "Niezdrowe wdrożenie: szczur-radar-pr-81 / szczur-radar-api"},
-    {"number": 11, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api"}]'
+open_issues green-close '[{"number": 3, "title": "Niezdrowe wdrożenie: pre-production / szczur-radar-api"},
+    {"number": 11, "title": "Niezdrowe wdrożenie: production / szczur-radar-api"}]'
 verify_case green-close 0 ""
 gh_calls_are green-close "$list_call" "issue comment 11 --repo $repo --body-file " "issue close 11 --repo $repo"
 body_says green-close 'Zielone po deployu `00000000-0000-4000-8000-0000000000d1`'
-run_says green-close '::notice::verify: closed the issue #11 of szczur-radar-pr-8 / szczur-radar-api'
+run_says green-close '::notice::verify: closed the issue #11 of production / szczur-radar-api'
 pass "GREEN with an open issue of the service: a comment and closing it"
 
 railway_answers green-web szczur-radar-web "$(only w2 SUCCESS)"
-open_issues green-web '[{"number": 11, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api"}]'
+open_issues green-web '[{"number": 11, "title": "Niezdrowe wdrożenie: production / szczur-radar-api"}]'
 verify_case green-web 0 "" SERVICE_NAME=szczur-radar-web
 gh_calls_are green-web "$list_call"
 pass "GREEN of the web with an open issue of the API: the API's issue stays open, no comment"
@@ -551,8 +552,16 @@ posts_are alert-red "POST $ping/fail 200 DEPLOY_UNHEALTHY (production / db-backu
 run_says alert-red '::notice::verify: alerted the operator through healthchecks.io'
 gh_calls_are alert-red "label create deploy-health" "$list_call" "issue create "
 railway_answers alert-pr-env db-backup "$(only b1 CRASHED)"
-verify_case alert-pr-env 1 "$pinged" SERVICE_NAME=db-backup HEALTHCHECK_PING_URL=@STUB@$ping
+verify_case alert-pr-env 1 "$pinged" SERVICE_NAME=db-backup ENVIRONMENT_NAME=szczur-radar-pr-8 HEALTHCHECK_PING_URL=@STUB@$ping
 posts_are alert-pr-env
+gh_calls_are alert-pr-env
+run_says alert-pr-env '::error::verify: szczur-radar-pr-8 / db-backup is unhealthy'
+out_says alert-pr-env '### Niezdrowe wdrożenie: `szczur-radar-pr-8` / `db-backup`'
+railway_answers pr-env-green szczur-radar-api "$(only a1 SUCCESS)"
+open_issues pr-env-green '[{"number": 11, "title": "Niezdrowe wdrożenie: szczur-radar-pr-8 / szczur-radar-api"}]'
+verify_case pr-env-green 0 "" ENVIRONMENT_NAME=szczur-radar-pr-8
+gh_calls_are pr-env-green
+pass "a PR env: the run's result only (red or green), no issue, no gh call, no check-in"
 railway_answers alert-green db-backup "$(only b1 SUCCESS)"
 verify_case alert-green 0 "$pinged" SERVICE_NAME=db-backup ENVIRONMENT_NAME=production HEALTHCHECK_PING_URL=@STUB@$ping
 posts_are alert-green
@@ -605,7 +614,7 @@ railway_answers gh-fails-red szczur-radar-api "$(only a2 FAILED)"
 mkdir -p "$tmp/gh-fails-red.gh"
 touch "$tmp/gh-fails-red.gh/fail"
 verify_case gh-fails-red 1 ""
-run_says gh-fails-red '::error::verify: gh label create deploy-health failed, the issue of szczur-radar-pr-8 / szczur-radar-api is not up to date: HTTP 401'
+run_says gh-fails-red '::error::verify: gh label create deploy-health failed, the issue of production / szczur-radar-api is not up to date: HTTP 401'
 out_says gh-fails-red '### Niezdrowe wdrożenie'
 railway_answers gh-fails-green szczur-radar-api "$(only a1 SUCCESS)"
 mkdir -p "$tmp/gh-fails-green.gh"
