@@ -133,7 +133,7 @@ mkdir -p "$tmp/bin"
 # The stub `railway`: answers `railway deployment list --json --limit <n> -s <service> -p <project> -e
 # <environment>` of the project and environment above, with RAILWAY_API_TOKEN set, from
 # $RAILWAY_STUB/<service>, one line per call, the last one repeating: a JSON list of deployments, or
-# "fail" (the CLI fails), "unauthorized" (Railway refuses the token, the CLI's message) or "hang" (no
+# "fail" (the CLI fails), "unauthorized" / "invalid-token" (Railway refuses the token, two wordings) or "hang" (no
 # answer within the test's CLI_TIMEOUT). A service
 # without a file is unknown (the CLI's error). Every call goes to
 # $RAILWAY_STUB/calls; any other command or option fails with exit 3.
@@ -167,6 +167,7 @@ fi
 case $answer in
     fail) echo "Failed to fetch: error sending request" >&2; exit 1 ;;
     hang) sleep 30 ;;
+    invalid-token) echo "Error: Invalid project token" >&2; exit 1 ;;
     unauthorized) echo "Unauthorized. Please check that your RAILWAY_API_TOKEN is valid and has access to the resource you're trying to use." >&2; exit 1 ;;
     *) printf '%s\n' "$answer" ;;
 esac
@@ -538,7 +539,10 @@ verify_case railway-unauthorized 1 "" SETTLE_TIMEOUT=30s
 out_says railway-unauthorized '| Stan deployu | **nieweryfikowalne: token Railway odrzucony** |'
 gh_calls_are railway-unauthorized "label create deploy-health" "$list_call" "issue create "
 web_requests_were railway-unauthorized 0
-pass "Railway refusing the token: RED at once (one question, no retry), the issue says so"
+railway_answers railway-invalid-token szczur-radar-api invalid-token "$(only a1 SUCCESS)"
+verify_case railway-invalid-token 1 "" SETTLE_TIMEOUT=30s
+out_says railway-invalid-token '| Stan deployu | **nieweryfikowalne: token Railway odrzucony** |'
+pass "Railway refusing the token (either wording): RED at once (one question, no retry), the issue says so"
 
 railway_answers gh-fails-red szczur-radar-api "$(only a2 FAILED)"
 mkdir -p "$tmp/gh-fails-red.gh"

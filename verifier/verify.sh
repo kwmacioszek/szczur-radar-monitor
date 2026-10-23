@@ -151,7 +151,7 @@ latest() {
     if ! out=$(limited "$cli_timeout" railway deployment list --json --limit "$deployment_limit" -s "$service" \
             -p "$RAILWAY_PROJECT_ID" -e "$ENVIRONMENT_ID" 2>"$work/railway-error"); then
         log "verify: railway deployment list -s $service failed: $(head -n 3 "$work/railway-error" | tr '\n' ' ')"
-        ! grep -q Unauthorized "$work/railway-error" || return 2
+        ! grep -qiE "unauthorized|invalid.*token" "$work/railway-error" || return 2
         return 1
     fi
     # createdAt is ISO 8601 in UTC; fractions of a second are dropped before it is compared.
