@@ -11,3 +11,8 @@ compatibility_date = "2026-10-01"
 # Public values, not secrets: the szczur-radar Railway project and this repository.
 RAILWAY_PROJECT_ID = "decf00e4-f5a4-43df-b338-6698be87c5a1"
 GITHUB_REPO = "kwmacioszek/szczur-radar-monitor"
+
+# Workers Logs (Free plan: far above this Worker's few dozen requests a day, kept 3 days): the 502s
+# of an expired GITHUB_DISPATCH_TOKEN and the 204s of dropped events are visible in the dashboard.
+[observability]
+enabled = true
