@@ -8,7 +8,8 @@
 #   2. the verdict: a readiness service SUCCESS / SLEEPING with every probe passing (GREEN); FAILED while
 #      the old version still serves (RED); a web deploy while a cron is CRASHED (GREEN, the cron never
 #      read); a cron CRASHED or SUCCESS (no probe); DEPLOYING → SUCCESS or → FAILED; a transient state
-#      until SETTLE_TIMEOUT (RED, unverifiable); SKIPPED and REMOVED rows with a newer createdAt
+#      until SETTLE_TIMEOUT (RED, unverifiable); a newer deploy WAITING / QUEUED / NEEDS_APPROVAL that
+#      is not the webhook's skipped (the serving one judged); SKIPPED and REMOVED rows with a newer createdAt
 #      ignored, the list sorted by createdAt; no deployment; an unknown state; /api/ready 503 for the
 #      whole window (RED) or until it wakes (GREEN); GET / without text/html or without /assets/ (RED);
 #      an environment without a known web address (RED);
@@ -16,7 +17,9 @@
 #      on the open one; szczur-radar-pr-8 / szczur-radar-api never matches szczur-radar-pr-81 /
 #      szczur-radar-api (nor a pull request); GREEN comments on and closes that service's issue, leaves
 #      another service's open, and without one only reads the list;
-#   4. errors: railway failing (RED, exit 1), gh failing (exit 1), a missing or bad variable (exit 2).
+#   4. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
+#      failing (exit 1), a hung railway or gh call stopped after CLI_TIMEOUT, a missing or bad variable
+#      (exit 2).
 # Needs bash, jq, curl and python3. Short limits (1–3 s) keep it under a minute or so.
 # Run from anywhere: verifier/test.sh
 set -euo pipefail
@@ -130,7 +133,9 @@ mkdir -p "$tmp/bin"
 # The stub `railway`: answers `railway deployment list --json --limit <n> -s <service> -p <project> -e
 # <environment>` of the project and environment above, with RAILWAY_API_TOKEN set, from
 # $RAILWAY_STUB/<service>, one line per call, the last one repeating: a JSON list of deployments, or
-# "fail" (the CLI fails). A service without a file is unknown (the CLI's error). Every call goes to
+# "fail" (the CLI fails), "unauthorized" / "invalid-token" (Railway refuses the token, two wordings) or "hang" (no
+# answer within the test's CLI_TIMEOUT). A service
+# without a file is unknown (the CLI's error). Every call goes to
 # $RAILWAY_STUB/calls; any other command or option fails with exit 3.
 cat >"$tmp/bin/railway" <<'SH'
 #!/usr/bin/env bash
@@ -161,13 +166,17 @@ if (( $(wc -l <"$answers") > 1 )); then
 fi
 case $answer in
     fail) echo "Failed to fetch: error sending request" >&2; exit 1 ;;
+    hang) sleep 30 ;;
+    invalid-token) echo "Error: Invalid project token" >&2; exit 1 ;;
+    unauthorized) echo "Unauthorized. Please check that your RAILWAY_API_TOKEN is valid and has access to the resource you're trying to use." >&2; exit 1 ;;
     *) printf '%s\n' "$answer" ;;
 esac
 SH
 chmod +x "$tmp/bin/railway"
 
 # The stub `gh`: every call goes to $GH_STUB/calls (one line of arguments) and the file of --body-file
-# to $GH_STUB/body; $GH_STUB/fail makes every call fail (as gh does without a valid token).
+# to $GH_STUB/body; $GH_STUB/fail makes every call fail (as gh does without a valid token), $GH_STUB/hang
+# makes every call hang.
 # `api repos/<repo>/issues?…` prints $GH_STUB/issues ([] without it); `issue create` and `issue
 # comment` print a URL, as gh does. Any other command, or a call without GH_TOKEN, fails with exit 3.
 cat >"$tmp/bin/gh" <<'SH'
@@ -179,6 +188,7 @@ for (( i = 0; i < ${#args[@]}; i++ )); do
     [[ ${args[i]} != --body-file ]] || cp "${args[i + 1]}" "$GH_STUB/body"
 done
 [[ -n ${GH_TOKEN:-} ]] || { echo "stub gh: no GH_TOKEN" >&2; exit 3; }
+[[ ! -f $GH_STUB/hang ]] || sleep 30
 [[ ! -f $GH_STUB/fail ]] || { echo "HTTP 401: Bad credentials (https://api.github.com/graphql)" >&2; exit 1; }
 case "${1:-} ${2:-}" in
     "label create" | "issue close") ;;
@@ -294,6 +304,7 @@ run_verify() {
     env -u EVENT_TYPE -u ENVIRONMENT_ID -u ENVIRONMENT_NAME -u SERVICE_NAME -u DEPLOYMENT_ID \
         -u RAILWAY_API_TOKEN -u RAILWAY_PROJECT_ID -u READINESS_SERVICES -u MONITOR_ASSIGNEE -u GH_TOKEN \
         -u GITHUB_REPOSITORY -u GITHUB_RUN_ID -u WAKE_TIMEOUT -u SETTLE_TIMEOUT -u SETTLE_INTERVAL -u WEB_URL \
+        -u CLI_TIMEOUT \
         PATH="$tmp/bin:$PATH" RAILWAY_STUB="$tmp/$name.railway" GH_STUB="$tmp/$name.gh" \
         STUB_PROJECT_ID=$project_id STUB_ENVIRONMENT_ID=$environment_id \
         EVENT_TYPE=Deployment.deployed ENVIRONMENT_ID=$environment_id ENVIRONMENT_NAME=szczur-radar-pr-8 \
@@ -366,7 +377,7 @@ railway_answers cron-crashed szczur-radar-api "$(only a1 FAILED)"
 verify_case cron-crashed 1 "" SERVICE_NAME=pipeline-trigger EVENT_TYPE=Deployment.crashed
 web_requests_were cron-crashed 0
 railway_asked_only cron-crashed pipeline-trigger
-out_says cron-crashed '| Usługa | `pipeline-trigger` (cron: tylko stan deployu) |'
+out_says cron-crashed '| Usługa | `pipeline-trigger` (tylko stan deployu, bez sond) |'
 out_says cron-crashed '| Stan deployu | **CRASHED** |'
 ! grep -qF '| Sonda |' "$tmp/cron-crashed.out" || { show_run cron-crashed; die "cron-crashed: the report has probes"; }
 railway_answers cron-success db-backup "$(only b1 SUCCESS)"
@@ -383,13 +394,27 @@ verify_case settles-red 1 ""
 out_says settles-red '| Stan deployu | **FAILED** |'
 pass "DEPLOYING, then SUCCESS: GREEN; BUILDING, DEPLOYING, then FAILED: RED"
 
+# The webhook's own deployment (a redeploy may still be queued); INITIALIZING counts whoever's it is.
 for status in QUEUED WAITING NEEDS_APPROVAL INITIALIZING; do
-    railway_answers "transient-$status" szczur-radar-api "$(only a2 "$status")"
+    railway_answers "transient-$status" szczur-radar-api "$(only "$deployment_id" "$status")"
     verify_case "transient-$status" 1 "" SETTLE_TIMEOUT=2s
     out_says "transient-$status" "| Stan deployu | **nieweryfikowalne: $status** |"
     web_requests_were "transient-$status" 0
 done
 pass "a transient state (QUEUED, WAITING, NEEDS_APPROVAL, INITIALIZING) until SETTLE_TIMEOUT: RED, unverifiable"
+
+# A later push's deploy waiting for CI (or queued) is not the webhook's: the one serving is judged.
+for status in WAITING QUEUED NEEDS_APPROVAL; do
+    railway_answers "newer-$status" szczur-radar-api "$(deployments \
+        "a9 $status 2026-10-20T11:00:00.000Z" "$deployment_id SUCCESS 2026-10-20T10:00:00.000Z")"
+    verify_case "newer-$status" 0 ""
+    out_says "newer-$status" '| Stan deployu | **SUCCESS** |'
+done
+railway_answers newer-waiting-failed szczur-radar-api "$(deployments \
+    "a9 WAITING 2026-10-20T11:00:00.000Z" "$deployment_id FAILED 2026-10-20T10:00:00.000Z")"
+verify_case newer-waiting-failed 1 ""
+out_says newer-waiting-failed '| Stan deployu | **FAILED** |'
+pass "a newer deploy WAITING / QUEUED / NEEDS_APPROVAL (not the webhook's) skipped: the serving one judged"
 
 # Not sorted on purpose: the newest by createdAt, whatever the order, and SKIPPED / REMOVED / REMOVING
 # rows (which carry a newer commit) do not count.
@@ -506,6 +531,19 @@ railway_answers railway-recovers szczur-radar-api fail "$(only a1 SUCCESS)"
 verify_case railway-recovers 0 ""
 pass "railway failing or printing no list until SETTLE_TIMEOUT: RED, unverifiable, exit 1; failing once: retried"
 
+# A refused token never heals within the window: one question, RED at once, no "Railway nie odpowiada".
+railway_answers railway-unauthorized szczur-radar-api unauthorized "$(only a1 SUCCESS)"
+verify_case railway-unauthorized 1 "" SETTLE_TIMEOUT=30s
+(( $(wc -l <"$tmp/railway-unauthorized.railway/calls") == 1 )) \
+    || { show_run railway-unauthorized; die "railway-unauthorized: railway asked more than once"; }
+out_says railway-unauthorized '| Stan deployu | **nieweryfikowalne: token Railway odrzucony** |'
+gh_calls_are railway-unauthorized "label create deploy-health" "$list_call" "issue create "
+web_requests_were railway-unauthorized 0
+railway_answers railway-invalid-token szczur-radar-api invalid-token "$(only a1 SUCCESS)"
+verify_case railway-invalid-token 1 "" SETTLE_TIMEOUT=30s
+out_says railway-invalid-token '| Stan deployu | **nieweryfikowalne: token Railway odrzucony** |'
+pass "Railway refusing the token (either wording): RED at once (one question, no retry), the issue says so"
+
 railway_answers gh-fails-red szczur-radar-api "$(only a2 FAILED)"
 mkdir -p "$tmp/gh-fails-red.gh"
 touch "$tmp/gh-fails-red.gh/fail"
@@ -518,6 +556,17 @@ touch "$tmp/gh-fails-green.gh/fail"
 verify_case gh-fails-green 1 ""
 run_says gh-fails-green "::error::verify: gh api repos/$repo/issues failed"
 pass "gh failing (RED, or GREEN reading the issues): exit 1"
+
+# A hung CLI call is stopped after CLI_TIMEOUT: railway as "Railway nie odpowiada", gh as a failed call.
+railway_answers railway-hangs szczur-radar-api hang
+verify_case railway-hangs 1 "" CLI_TIMEOUT=1s SETTLE_TIMEOUT=2s
+out_says railway-hangs '| Stan deployu | **nieweryfikowalne: Railway nie odpowiada** |'
+railway_answers gh-hangs szczur-radar-api "$(only a2 FAILED)"
+mkdir -p "$tmp/gh-hangs.gh"
+touch "$tmp/gh-hangs.gh/hang"
+verify_case gh-hangs 1 "" CLI_TIMEOUT=1s
+run_says gh-hangs '::error::verify: gh label create deploy-health failed'
+pass "a hung railway or gh call stopped after CLI_TIMEOUT: RED (Railway nie odpowiada) or exit 1"
 
 for case in \
     "no-event EVENT_TYPE=" \

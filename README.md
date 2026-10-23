@@ -27,14 +27,18 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
 
 1. Stan: `railway deployment list --json -s <usługa>` w danym środowisku (token workspace,
    `RAILWAY_PROJECT_ID` + ID środowiska, nigdy `railway link`). Liczy się najnowszy deploy wg
-   `createdAt` poza `SKIPPED`, `REMOVED` i `REMOVING`.
+   `createdAt` poza `SKIPPED`, `REMOVED` i `REMOVING`. Nowszy deploy `WAITING`, `QUEUED` albo
+   `NEEDS_APPROVAL` (np. kolejny push czekający na CI) też się nie liczy, chyba że to deploy
+   z webhooka: jeszcze nie wystartował, więc ocenia się ten, który działa, a jego własny webhook
+   da osobny run.
 
    | Stan | Wynik |
    | --- | --- |
    | `SUCCESS`, `SLEEPING` | OK |
    | `FAILED`, `CRASHED` | czerwony |
    | `BUILDING`, `DEPLOYING`, `INITIALIZING`, `QUEUED`, `WAITING`, `NEEDS_APPROVAL` | pytanie co 10 s; po 5 min (`SETTLE_TIMEOUT`) czerwony „nieweryfikowalne” |
-   | brak deployu, nieznany stan, Railway nie odpowiada do końca okna | czerwony |
+   | brak deployu, nieznany stan, Railway nie odpowiada do końca okna (wywołanie `railway` albo `gh` dłuższe niż 60 s, `CLI_TIMEOUT`, liczy się jako nieudane) | czerwony |
+   | Railway odrzuca token (`Unauthorized`) | od razu czerwony „nieweryfikowalne: token Railway odrzucony”, bez ponowień; wymień token (`SECURITY.md`) |
 
 2. Usługi gotowości (`READINESS_SERVICES`, domyślnie `szczur-radar-api,szczur-radar-web`): po stanie
    OK sondy przez origin weba środowiska (`verifier/web-url.sh`), każda ponawiana w jednym oknie
@@ -42,8 +46,9 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
    - `GET /api/ready` → 200 (API sięga bazy),
    - `GET /healthz` → 200 (Caddy żyje),
    - `GET /` → 200, `text/html` z odwołaniem do `/assets/` (SPA naprawdę serwowane).
-3. Crony (każda inna usługa, np. `pipeline-trigger`, `db-backup`): tylko stan deployu tego crona,
-   bez sond. Run API lub weba nigdy nie czyta stanu cronów, a run crona nie czyta stanu API ani weba.
+3. Każda inna usługa (crony `pipeline-trigger`, `db-backup`, baza `postgres`): tylko stan jej
+   deployu, bez sond. Run API lub weba nigdy nie czyta stanu innych usług, a run innej usługi nie
+   czyta stanu API ani weba.
 
 **Zielony** = stan OK i (dla usługi gotowości) wszystkie sondy przeszły. Inaczej **czerwony**
 (`exit 1`). Błędy po starcie (wyjątki w logach, awarie w ruchu) są poza zakresem. Kody wyjścia
@@ -78,7 +83,9 @@ się samo ze sobą; duplikaty webhooków dają po prostu kolejny run z tym samym
 - Railway wysyła webhooki best-effort. Zgubiony webhook albo przepełnienie kolejki środowiska
   (ponad 100 oczekujących runów; nadmiar GitHub anuluje) pomija weryfikację tego deployu. Wtedy
   uruchom `verify.yml` ręcznie (Actions → verify → Run workflow, gałąź `main`) z danymi usługi:
-  typ zdarzenia, ID i nazwa środowiska, nazwa usługi, ID deployu.
+  typ zdarzenia, ID i nazwa środowiska, nazwa usługi, ID deployu. ID i nazwę środowiska kopiuj
+  razem z jednego źródła (`railway environment list --json`, tabela w issue albo raport runu):
+  stan czytany jest po ID, a sondy i issue idą po nazwie, więc ich pomyłka miesza dwa środowiska.
 - Środowisko spoza `production` i `szczur-radar-pr-<N>` nie ma znanego adresu weba, więc deploy
   API lub weba w nim jest czerwony „nieweryfikowalne”.
 

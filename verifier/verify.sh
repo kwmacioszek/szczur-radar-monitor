@@ -16,28 +16,34 @@
 #   RAILWAY_API_TOKEN   a Railway workspace token (read by the railway CLI; never `railway link`)
 #   RAILWAY_PROJECT_ID  the szczur-radar project's ID (a UUID)
 #   READINESS_SERVICES  comma-separated services whose deploy is judged by the environment's readiness
-#                       (default szczur-radar-api,szczur-radar-web); every other service is a cron
+#                       (default szczur-radar-api,szczur-radar-web); every other service (a cron,
+#                       the database) is judged by its deployment state alone
 #   MONITOR_ASSIGNEE    the GitHub login a new issue is assigned to (the push in GitHub Mobile)
 #   GH_TOKEN, GITHUB_REPOSITORY  gh against this monitor repo (issues: write); GITHUB_SERVER_URL and
 #                       GITHUB_RUN_ID give the run link in the report
 #   SETTLE_TIMEOUT      how long a transient state is polled for (default 5m; durations: 30s, 3m, 2h)
 #   SETTLE_INTERVAL     between the questions to Railway (default 10s)
 #   WAKE_TIMEOUT        how long the probes are retried once the state is OK (default 3m)
+#   CLI_TIMEOUT         the limit of one railway or gh call (default 60s; a hung call counts as failed)
 #   WEB_URL             optional, for tests and manual use only (the workflow never sets it): the web
 #                       origin to probe instead of web-url.sh's
 #
 # The verdict, from `railway deployment list --json -s <SERVICE_NAME>` in the environment only (the
 # state of another service is never read): the latest deployment is the newest by createdAt, skipping
-# SKIPPED, REMOVED and REMOVING.
+# SKIPPED, REMOVED and REMOVING, and skipping WAITING, QUEUED and NEEDS_APPROVAL unless it is the
+# webhook's DEPLOYMENT_ID: a later push's deploy that has not started (e.g. waiting for CI) does not
+# replace the one serving, and its own final webhook gives its own run.
 #   FAILED, CRASHED                       RED
 #   BUILDING, DEPLOYING, INITIALIZING,    polled every SETTLE_INTERVAL; still transient (or Railway not
 #   QUEUED, WAITING, NEEDS_APPROVAL       answering) after SETTLE_TIMEOUT: RED, "nieweryfikowalne"
 #   SUCCESS, SLEEPING                     OK
 #   no deployment, an unknown state       RED
+#   Railway refusing the token            RED at once, "nieweryfikowalne: token Railway odrzucony"
+#   (Unauthorized)                        (no retry: a refused token does not heal within the window)
 # A readiness service with an OK state is then probed through the web origin, every probe retried
 # within one WAKE_TIMEOUT window: GET /api/ready and GET /healthz must answer 200, GET / 200 with
-# text/html that references /assets/ (the SPA, not only Caddy). A cron is judged by its state alone,
-# without probes. GREEN = an OK state and, for a readiness service, every probe passed.
+# text/html that references /assets/ (the SPA, not only Caddy). Any other service is judged by its state
+# alone, without probes. GREEN = an OK state and, for a readiness service, every probe passed.
 #
 # Issues (label deploy-health, one per environment and service, titled
 # "Niezdrowe wdrożenie: <environment> / <service>", found as whole words, the oldest open one):
@@ -95,17 +101,18 @@ for service in "${readiness_list[@]}"; do
 done
 (( ${#readiness_services[@]} > 0 )) || usage_error "READINESS_SERVICES names no service"
 
-: "${SETTLE_TIMEOUT:=5m}" "${SETTLE_INTERVAL:=10s}" "${WAKE_TIMEOUT:=3m}"
+: "${SETTLE_TIMEOUT:=5m}" "${SETTLE_INTERVAL:=10s}" "${WAKE_TIMEOUT:=3m}" "${CLI_TIMEOUT:=60s}"
 duration_seconds SETTLE_TIMEOUT; readonly settle_timeout=$REPLY
 duration_seconds SETTLE_INTERVAL; readonly settle_interval=$REPLY
 duration_seconds WAKE_TIMEOUT; readonly wake_timeout=$REPLY
+duration_seconds CLI_TIMEOUT; readonly cli_timeout=$REPLY
 for tool in railway gh jq curl; do
     command -v "$tool" >/dev/null || usage_error "$tool is not installed"
 done
 
 readonly environment=$ENVIRONMENT_NAME service=$SERVICE_NAME
-# The service's class: a readiness service (api, web) or a cron.
-kind=cron
+# The service's class: a readiness service (api, web) or a state service (a cron, the database).
+kind=state
 for readiness_service in "${readiness_services[@]}"; do
     [[ $service != "$readiness_service" ]] || kind=readiness
 done
@@ -138,22 +145,25 @@ readonly run_link
 
 # The service's latest deployment: sets LATEST_ID and LATEST_STATUS (LATEST_ID "none": no deployment
 # but SKIPPED, REMOVED or REMOVING ones). Returns 1, with the reason in the log, when the CLI fails or
-# prints no list of deployments.
+# prints no list of deployments, and 2 when Railway refuses the token (Unauthorized).
 latest() {
     local out
-    if ! out=$(railway deployment list --json --limit "$deployment_limit" -s "$service" \
+    if ! out=$(limited "$cli_timeout" railway deployment list --json --limit "$deployment_limit" -s "$service" \
             -p "$RAILWAY_PROJECT_ID" -e "$ENVIRONMENT_ID" 2>"$work/railway-error"); then
         log "verify: railway deployment list -s $service failed: $(head -n 3 "$work/railway-error" | tr '\n' ' ')"
+        ! grep -qiE "unauthorized|invalid.*token" "$work/railway-error" || return 2
         return 1
     fi
     # createdAt is ISO 8601 in UTC; fractions of a second are dropped before it is compared.
-    if ! out=$(jq -r '
+    if ! out=$(jq -r --arg webhook "$DEPLOYMENT_ID" '
             def created: .createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601;
             if type != "array" then error("not a list") else
                 map(if type == "object" and (.id | type) == "string" and (.status | type) == "string"
                         and (.createdAt | type) == "string"
                     then . else error("not a deployment") end)
                 | map(select(.status as $status | ["SKIPPED", "REMOVED", "REMOVING"] | index($status) | not))
+                | map(select(.id == $webhook
+                    or (.status as $status | ["WAITING", "QUEUED", "NEEDS_APPROVAL"] | index($status) | not)))
                 | map(. + {created: created})
                 | if length == 0 then "none -" else (max_by(.created) | "\(.id) \(.status)") end
             end' <<<"$out" 2>/dev/null); then
@@ -170,7 +180,9 @@ last_seen=""
 readonly settle_deadline=$(( SECONDS + settle_timeout ))
 log "verify: $EVENT_TYPE of $service in $environment (deployment $DEPLOYMENT_ID, a $kind service); reading its state in Railway"
 while true; do
-    if latest; then
+    railway_status=0
+    latest || railway_status=$?
+    if (( railway_status == 0 )); then
         last_seen=$LATEST_STATUS
         if [[ $LATEST_ID == none ]]; then
             state=RED state_text="brak deployu"
@@ -194,6 +206,9 @@ while true; do
                 break
                 ;;
         esac
+    elif (( railway_status == 2 )); then
+        state=UNVERIFIABLE state_text="nieweryfikowalne: token Railway odrzucony"
+        break
     else
         last_seen="Railway nie odpowiada"
     fi
@@ -278,7 +293,7 @@ readonly verdict
     fi
     printf '| | |\n| --- | --- |\n'
     printf '| Środowisko | `%s` (`%s`) |\n' "$environment" "$ENVIRONMENT_ID"
-    printf '| Usługa | `%s` (%s) |\n' "$service" "$([[ $kind == readiness ]] && echo 'gotowość środowiska' || echo 'cron: tylko stan deployu')"
+    printf '| Usługa | `%s` (%s) |\n' "$service" "$([[ $kind == readiness ]] && echo 'gotowość środowiska' || echo 'tylko stan deployu, bez sond')"
     printf '| Zdarzenie | `%s`, deploy `%s` |\n' "$EVENT_TYPE" "$DEPLOYMENT_ID"
     printf '| Najnowszy deploy (Railway) | %s |\n' "$deployment_text"
     printf '| Stan deployu | **%s** |\n' "$state_text"
@@ -303,7 +318,7 @@ gh_failed() {
 # also returns pull requests.
 open_issue() {
     local issues
-    issues=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=$label&state=open&per_page=100" \
+    issues=$(limited "$cli_timeout" gh api "repos/$GITHUB_REPOSITORY/issues?labels=$label&state=open&per_page=100" \
         2>"$work/gh-error") || gh_failed "gh api repos/$GITHUB_REPOSITORY/issues"
     # "<environment> / <service>" as whole words: szczur-radar-pr-8 must not match szczur-radar-pr-81
     # (both names are [a-z0-9-], so they need no regex escaping).
@@ -317,16 +332,16 @@ open_issue() {
 }
 
 if [[ $verdict == GREEN ]]; then
-    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == cron ]] || echo ', every probe passed'))"
+    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == state ]] || echo ', every probe passed'))"
     open_issue
     if [[ -n $ISSUE ]]; then
         {
             printf 'Zielone po deployu `%s`: zamykam.\n\n' "$DEPLOYMENT_ID"
             cat "$work/report.md"
         } >"$work/comment.md"
-        gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/comment.md" >/dev/null \
+        limited "$cli_timeout" gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/comment.md" >/dev/null \
             2>"$work/gh-error" || gh_failed "gh issue comment $ISSUE"
-        gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>"$work/gh-error" \
+        limited "$cli_timeout" gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>"$work/gh-error" \
             || gh_failed "gh issue close $ISSUE"
         log "::notice::verify: closed the issue #$ISSUE of $environment / $service"
     fi
@@ -335,16 +350,16 @@ if [[ $verdict == GREEN ]]; then
 fi
 
 log "::error::verify: $environment / $service is unhealthy after $EVENT_TYPE (deployment $DEPLOYMENT_ID): $state_text"
-gh label create "$label" --repo "$GITHUB_REPOSITORY" --force --color B60205 \
+limited "$cli_timeout" gh label create "$label" --repo "$GITHUB_REPOSITORY" --force --color B60205 \
     --description "Unhealthy deployment reported by szczur-radar-monitor" >/dev/null 2>"$work/gh-error" \
     || gh_failed "gh label create $label"
 open_issue
 if [[ -n $ISSUE ]]; then
-    url=$(gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/report.md" 2>"$work/gh-error") \
+    url=$(limited "$cli_timeout" gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/report.md" 2>"$work/gh-error") \
         || gh_failed "gh issue comment $ISSUE"
     log "::notice::verify: commented on the open issue #$ISSUE: $url"
 else
-    url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title_prefix$environment / $service" \
+    url=$(limited "$cli_timeout" gh issue create --repo "$GITHUB_REPOSITORY" --title "$title_prefix$environment / $service" \
         --label "$label" --assignee "$MONITOR_ASSIGNEE" --body-file "$work/report.md" 2>"$work/gh-error") \
         || gh_failed "gh issue create"
     log "::notice::verify: opened $url"
