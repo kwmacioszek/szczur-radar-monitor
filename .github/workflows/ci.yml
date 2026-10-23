@@ -26,7 +26,8 @@ jobs:
       - name: Verifier tests (stub railway, gh and web)
         run: verifier/test.sh
       - name: shellcheck
-        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 verifier/*.sh
+        # v0.11.0, pinned by digest like the actions by SHA.
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d verifier/*.sh
 
   worker:
     name: worker (tests + types)
