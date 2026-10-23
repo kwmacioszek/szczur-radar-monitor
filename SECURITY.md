@@ -10,6 +10,7 @@ Repo jest publiczne. Nie zawiera żadnych sekretów: sekrety żyją wyłącznie 
 | `WEBHOOK_SECRET` | sekret Workera; nagłówek `X-Monitor-Secret` webhooka Railway | brak, tylko uwierzytelnienie webhooka | ktoś może wysłać fałszywe zdarzenie; Worker i tak przyjmie tylko projekt szczur-radar i poprawne pola, a run tylko czyta stan z Railway |
 | `GITHUB_DISPATCH_TOKEN` | sekret Workera | fine-grained PAT: tylko repo `szczur-radar-monitor`, **Actions: write**, nic więcej, z datą wygaśnięcia | uruchamianie i anulowanie runów monitora |
 | `RAILWAY_API_TOKEN` | sekret środowiska GitHub `monitor`, którego deployment branches to tylko `main`; czyta go wyłącznie `verify.yml` (`secrets.RAILWAY_API_TOKEN` w `env:` jednego kroku) | dedykowany token workspace Railway (Railway nie ma tokenów tylko do odczytu; token projektu obejmuje jedno środowisko, a monitor obserwuje też PR envy) | dostęp do workspace Railway; dlatego tylko w chronionym środowisku, nigdy w `ci.yml` |
+| `HEALTHCHECK_PING_URL` | sekret środowiska GitHub `monitor`, jak `RAILWAY_API_TOKEN`; w `env:` tego samego kroku `verify.yml` | adres pingu jednego checka healthchecks.io, `production/deploy-health` (nie checków API ani cronów szczur-radar) | wyciek pozwala wysyłać fałszywe alarmy deployu do Telegrama; nic więcej. Skrypt przekazuje go `curl` przez konfigurację na stdin i nigdy go nie drukuje |
 | `GITHUB_TOKEN` | automatyczny token runu | `verify.yml`: `contents: read`, `issues: write` (issue `deploy-health` w tym repo); `ci.yml`: tylko `contents: read`; jawnie w każdym workflow | wygasa z końcem runu |
 
 `RAILWAY_PROJECT_ID` i `GITHUB_REPO` (`worker/wrangler.toml`) oraz zmienne repo
@@ -46,6 +47,9 @@ Zasady:
   samymi uprawnieniami, `npx wrangler secret put GITHUB_DISPATCH_TOKEN`, potem unieważnij stary.
 - `RAILWAY_API_TOKEN`: rotowany razem z PAT. Nowy token workspace, podmiana sekretu w środowisku
   `monitor`, unieważnienie starego w Railway.
+- `HEALTHCHECK_PING_URL`: przy wycieku `tools/healthchecks/checks.sh delete production` i `apply
+  production` w szczur-radar dają nowe adresy wszystkich checków produkcji (także API i cronów, które
+  trzeba wtedy podmienić w Railway); nowy adres `production/deploy-health` do sekretu środowiska `monitor`.
 - `WEBHOOK_SECRET`: nowy losowy ciąg (np. `openssl rand -hex 32`), `npx wrangler secret put
   WEBHOOK_SECRET`, zaraz potem ta sama wartość w nagłówku webhooka Railway. Między tymi krokami
   webhooki dostają 401 i Railway je ponawia.

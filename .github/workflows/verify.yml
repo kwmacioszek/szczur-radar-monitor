@@ -80,6 +80,7 @@ jobs:
           SERVICE_NAME: ${{ inputs.service_name }}
           DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          HEALTHCHECK_PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
           READINESS_SERVICES: ${{ vars.READINESS_SERVICES }}
           MONITOR_ASSIGNEE: ${{ vars.MONITOR_ASSIGNEE }}

@@ -17,7 +17,9 @@
 #      on the open one; szczur-radar-pr-8 / szczur-radar-api never matches szczur-radar-pr-81 /
 #      szczur-radar-api (nor a pull request); GREEN comments on and closes that service's issue, leaves
 #      another service's open, and without one only reads the list;
-#   4. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
+#   4. the operator's alert: a red run of production checks in /fail with its summary, then a success, to
+#      HEALTHCHECK_PING_URL; a PR env or a green run does not; healthchecks.io failing changes nothing;
+#   5. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
 #      failing (exit 1), a hung railway or gh call stopped after CLI_TIMEOUT, a missing or bad variable
 #      (exit 2).
 # Needs bash, jq, curl and python3. Short limits (1–3 s) keep it under a minute or so.
@@ -57,8 +59,9 @@ pass "an unknown name (staging, pr-0, pr-7x, empty) or no argument: exit 2, noth
 
 # The stub web origin. STUB_CASE (JSON) scripts it: {"paths": {"<path>": [answer, …]}}: GET <path> gives
 # the answers in turn, the last one repeating; an answer is {"status": <code>, "body": <JSON, or a
-# string sent as text>, "type": <Content-Type, optional>}; any other path: 404. One line per request on
-# stdout: "GET <path> <status>".
+# string sent as text>, "type": <Content-Type, optional>}; any other path: 404. POST answers the same way
+# (a healthchecks.io check-in). One line per request on stdout: "GET <path> <status>", or "POST <path>
+# <status> <body with | for each newline>".
 read -r -d '' stub_code <<'PY' || true
 import json, os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,7 +74,14 @@ class Web(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.answer("POST", self.rfile.read(length).decode().replace("\n", "|"))
+
     def do_GET(self):
+        self.answer("GET", None)
+
+    def answer(self, method, posted):
         answers = paths.get(self.path)
         if answers is None:
             entry = {"status": 404, "body": {"detail": "not_found"}}
@@ -87,7 +97,8 @@ class Web(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
-        print(f"GET {self.path} {entry['status']}", flush=True)
+        line = f"{method} {self.path} {entry['status']}"
+        print(line if posted is None else f"{line} {posted}", flush=True)
 
 
 server = ThreadingHTTPServer(("127.0.0.1", int(os.environ["STUB_PORT"])), Web)
@@ -304,7 +315,7 @@ run_verify() {
     env -u EVENT_TYPE -u ENVIRONMENT_ID -u ENVIRONMENT_NAME -u SERVICE_NAME -u DEPLOYMENT_ID \
         -u RAILWAY_API_TOKEN -u RAILWAY_PROJECT_ID -u READINESS_SERVICES -u MONITOR_ASSIGNEE -u GH_TOKEN \
         -u GITHUB_REPOSITORY -u GITHUB_RUN_ID -u WAKE_TIMEOUT -u SETTLE_TIMEOUT -u SETTLE_INTERVAL -u WEB_URL \
-        -u CLI_TIMEOUT \
+        -u CLI_TIMEOUT -u HEALTHCHECK_PING_URL \
         PATH="$tmp/bin:$PATH" RAILWAY_STUB="$tmp/$name.railway" GH_STUB="$tmp/$name.gh" \
         STUB_PROJECT_ID=$project_id STUB_ENVIRONMENT_ID=$environment_id \
         EVENT_TYPE=Deployment.deployed ENVIRONMENT_ID=$environment_id ENVIRONMENT_NAME=szczur-radar-pr-8 \
@@ -315,9 +326,9 @@ run_verify() {
         "$@" "$verify" >"$tmp/$name.out" 2>"$tmp/$name.log" || status=$?
     [[ $status == "$expected" ]] || { show_run "$name"; die "$name: exit code $status, expected $expected"; }
     # No secret in the log, the report or an issue.
-    ! grep -qF -e stub-railway-token -e stub-gh-token "$tmp/$name.out" "$tmp/$name.log" \
+    ! grep -qF -e stub-railway-token -e stub-gh-token -e ping-secret "$tmp/$name.out" "$tmp/$name.log" \
         || { show_run "$name"; die "$name: a token was printed"; }
-    [[ ! -f $tmp/$name.gh/body ]] || ! grep -qF -e stub-railway-token -e stub-gh-token "$tmp/$name.gh/body" \
+    [[ ! -f $tmp/$name.gh/body ]] || ! grep -qF -e stub-railway-token -e stub-gh-token -e ping-secret "$tmp/$name.gh/body" \
         || die "$name: a token went into an issue"
 }
 
@@ -333,7 +344,8 @@ verify_case() {
     local name=$1 expected=$2 web=${3:-$healthy_web}
     shift 3
     start_stub "$name" "$web"
-    run_verify "$name" "$expected" WEB_URL="$STUB_URL" "$@"
+    # @STUB@ in a variable stands for the stub's origin (known only once it runs).
+    run_verify "$name" "$expected" WEB_URL="$STUB_URL" "${@//@STUB@/$STUB_URL}"
     stop_stub
 }
 
@@ -517,7 +529,52 @@ verify_case green-none 0 ""
 gh_calls_are green-none "$list_call"
 pass "GREEN without an issue: only the list of open issues read, nothing written"
 
-step "4. errors"
+step "4. the operator's alert (healthchecks.io, production only)"
+readonly ping=/ping/ping-secret-0000
+readonly pinged="{\"paths\": {\"$ping/fail\": [{\"status\": 200, \"body\": \"OK\"}], \"$ping\": [{\"status\": 200, \"body\": \"OK\"}]}}"
+# Case $1's stub web got exactly the check-ins (POST lines) after it, in order, each a prefix of its line.
+posts_are() {
+    local name=$1 i=0 line
+    shift
+    local expected=("$@")
+    while IFS= read -r line; do
+        (( i < ${#expected[@]} )) || { show_run "$name"; die "$name: an unexpected check-in: $line"; }
+        [[ $line == "${expected[i]}"* ]] || { show_run "$name"; die "$name: check-in $(( i + 1 )) is not '${expected[i]}'"; }
+        i=$(( i + 1 ))
+    done < <(grep '^POST ' "$tmp/$name.requests" || true)
+    (( i == ${#expected[@]} )) || { show_run "$name"; die "$name: $i check-ins, expected ${#expected[@]}"; }
+}
+railway_answers alert-red db-backup "$(only b1 CRASHED)"
+verify_case alert-red 1 "$pinged" SERVICE_NAME=db-backup ENVIRONMENT_NAME=production HEALTHCHECK_PING_URL=@STUB@$ping
+posts_are alert-red "POST $ping/fail 200 DEPLOY_UNHEALTHY (production / db-backup): CRASHED; run https://github.com/$repo/actions/runs/4242" \
+    "POST $ping 200 ok"
+run_says alert-red '::notice::verify: alerted the operator through healthchecks.io'
+gh_calls_are alert-red "label create deploy-health" "$list_call" "issue create "
+railway_answers alert-pr-env db-backup "$(only b1 CRASHED)"
+verify_case alert-pr-env 1 "$pinged" SERVICE_NAME=db-backup HEALTHCHECK_PING_URL=@STUB@$ping
+posts_are alert-pr-env
+railway_answers alert-green db-backup "$(only b1 SUCCESS)"
+verify_case alert-green 0 "$pinged" SERVICE_NAME=db-backup ENVIRONMENT_NAME=production HEALTHCHECK_PING_URL=@STUB@$ping
+posts_are alert-green
+pass "a red run of production: /fail with the summary, then a success; a PR env or a green run: no check-in"
+railway_answers alert-down db-backup "$(only b1 CRASHED)"
+verify_case alert-down 1 "{\"paths\": {\"$ping/fail\": [{\"status\": 500, \"body\": \"no\"}]}}" \
+    SERVICE_NAME=db-backup ENVIRONMENT_NAME=production HEALTHCHECK_PING_URL=@STUB@$ping
+run_says alert-down '::warning::verify: the healthchecks.io alert was not delivered (HTTP 500 to the failure ping'
+posts_are alert-down "POST $ping/fail 500"
+railway_answers alert-stuck db-backup "$(only b1 CRASHED)"
+verify_case alert-stuck 1 "{\"paths\": {\"$ping/fail\": [{\"status\": 200, \"body\": \"OK\"}], \"$ping\": [{\"status\": 500, \"body\": \"no\"}]}}" \
+    SERVICE_NAME=db-backup ENVIRONMENT_NAME=production HEALTHCHECK_PING_URL=@STUB@$ping
+run_says alert-stuck 'the healthchecks.io alert went out, but HTTP 500 to the success ping'
+
+gh_calls_are alert-down "label create deploy-health" "$list_call" "issue create "
+railway_answers alert-unset db-backup "$(only b1 CRASHED)"
+verify_case alert-unset 1 "" SERVICE_NAME=db-backup ENVIRONMENT_NAME=production
+run_says alert-unset '::notice::verify: no HEALTHCHECK_PING_URL, no healthchecks.io alert'
+posts_are alert-unset
+pass "healthchecks.io failing: a warning, the verdict and the issue stand; no HEALTHCHECK_PING_URL: no alert"
+
+step "5. errors"
 railway_answers railway-fails szczur-radar-api fail
 verify_case railway-fails 1 "" SETTLE_TIMEOUT=2s
 run_says railway-fails 'verify: railway deployment list -s szczur-radar-api failed: Failed to fetch'
@@ -579,6 +636,8 @@ for case in \
     "long-service SERVICE_NAME=$(printf 'a%.0s' {1..65})" \
     "no-railway-token RAILWAY_API_TOKEN=" \
     "no-gh-token GH_TOKEN=" \
+    "bad-ping-url HEALTHCHECK_PING_URL=ftp://hc-ping.com/x" \
+    "quoted-ping-url HEALTHCHECK_PING_URL=https://hc-ping.com/x\"y" \
     "bad-repository GITHUB_REPOSITORY=szczur-radar-monitor" \
     "no-assignee MONITOR_ASSIGNEE=" \
     "bad-readiness READINESS_SERVICES=Api" \
