@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import worker, { type Env, FORWARDED_EVENT_TYPES } from "../src/index";
+import worker from "../src/index";
+import { type Env, FORWARDED_EVENT_TYPES } from "../src/relay";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const ENVIRONMENT_ID = "22222222-2222-4222-8222-222222222222";
