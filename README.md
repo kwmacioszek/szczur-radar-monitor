@@ -83,7 +83,9 @@ się samo ze sobą; duplikaty webhooków dają po prostu kolejny run z tym samym
 - Railway wysyła webhooki best-effort. Zgubiony webhook albo przepełnienie kolejki środowiska
   (ponad 100 oczekujących runów; nadmiar GitHub anuluje) pomija weryfikację tego deployu. Wtedy
   uruchom `verify.yml` ręcznie (Actions → verify → Run workflow, gałąź `main`) z danymi usługi:
-  typ zdarzenia, ID i nazwa środowiska, nazwa usługi, ID deployu.
+  typ zdarzenia, ID i nazwa środowiska, nazwa usługi, ID deployu. ID i nazwę środowiska kopiuj
+  razem z jednego źródła (`railway environment list --json`, tabela w issue albo raport runu):
+  stan czytany jest po ID, a sondy i issue idą po nazwie, więc ich pomyłka miesza dwa środowiska.
 - Środowisko spoza `production` i `szczur-radar-pr-<N>` nie ma znanego adresu weba, więc deploy
   API lub weba w nim jest czerwony „nieweryfikowalne”.
 
