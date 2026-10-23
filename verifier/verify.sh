@@ -47,8 +47,10 @@
 # text/html that references /assets/ (the SPA, not only Caddy). Any other service is judged by its state
 # alone, without probes. GREEN = an OK state and, for a readiness service, every probe passed.
 #
-# Issues (label deploy-health, one per environment and service, titled
-# "Niezdrowe wdrożenie: <environment> / <service>", found as whole words, the oldest open one):
+# Only production reports to the operator; in any other environment (the PR envs) the run's result is
+# the only signal: no issue and no alert.
+# Issues of production (label deploy-health, one per service, titled
+# "Niezdrowe wdrożenie: production / <service>", found as whole words, the oldest open one):
 #   RED:   a comment on that issue, or a new one assigned to MONITOR_ASSIGNEE;
 #   GREEN: a comment on that issue and closing it; an issue of another service stays open. Without
 #          one only the list of open issues is read.
@@ -120,7 +122,8 @@ if [[ -n ${HEALTHCHECK_PING_URL:-} ]]; then
     [[ $HEALTHCHECK_PING_URL =~ $ping_pattern ]] \
         || usage_error "HEALTHCHECK_PING_URL must be the http(s) ping URL of a healthchecks.io check"
 fi
-readonly alert_environment=production
+# The only environment that reports to the operator (an issue and a Telegram alert).
+readonly operator_environment=production
 for tool in railway gh jq curl; do
     command -v "$tool" >/dev/null || usage_error "$tool is not installed"
 done
@@ -333,7 +336,7 @@ check_in() {
     [[ $REPLY =~ ^2[0-9][0-9]$ ]]
 }
 
-if [[ $verdict == RED && $environment == "$alert_environment" ]]; then
+if [[ $verdict == RED && $environment == "$operator_environment" ]]; then
     if [[ -z ${HEALTHCHECK_PING_URL:-} ]]; then
         log "::notice::verify: no HEALTHCHECK_PING_URL, no healthchecks.io alert"
     else
@@ -351,7 +354,20 @@ if [[ $verdict == RED && $environment == "$alert_environment" ]]; then
     fi
 fi
 
-# --- The issue of this environment and service ----------------------------------------------------
+if [[ $verdict == GREEN ]]; then
+    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == state ]] || echo ', every probe passed'))"
+else
+    log "::error::verify: $environment / $service is unhealthy after $EVENT_TYPE (deployment $DEPLOYMENT_ID): $state_text"
+fi
+
+# Outside production the run's result is the only signal: no issue (and no alert, above).
+if [[ $environment != "$operator_environment" ]]; then
+    cat "$work/report.md"
+    [[ $verdict == GREEN ]] && exit 0
+    exit 1
+fi
+
+# --- The issue of this service (production only) -------------------------------------------------
 
 gh_failed() {
     log "::error::verify: $1 failed, the issue of $environment / $service is not up to date: $(head -n 3 "$work/gh-error" | tr '\n' ' ')"
@@ -366,7 +382,8 @@ open_issue() {
     local issues
     issues=$(limited "$cli_timeout" gh api "repos/$GITHUB_REPOSITORY/issues?labels=$label&state=open&per_page=100" \
         2>"$work/gh-error") || gh_failed "gh api repos/$GITHUB_REPOSITORY/issues"
-    # "<environment> / <service>" as whole words: szczur-radar-pr-8 must not match szczur-radar-pr-81
+    # "<environment> / <service>" as whole words: production / szczur-radar-api must not match
+    # pre-production / szczur-radar-api nor production / szczur-radar-api-x
     # (both names are [a-z0-9-], so they need no regex escaping).
     ISSUE=$(jq -r --arg name "$environment / $service" '
             if type != "array" then error("not a list") else
@@ -378,7 +395,6 @@ open_issue() {
 }
 
 if [[ $verdict == GREEN ]]; then
-    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == state ]] || echo ', every probe passed'))"
     open_issue
     if [[ -n $ISSUE ]]; then
         {
@@ -395,7 +411,6 @@ if [[ $verdict == GREEN ]]; then
     exit 0
 fi
 
-log "::error::verify: $environment / $service is unhealthy after $EVENT_TYPE (deployment $DEPLOYMENT_ID): $state_text"
 limited "$cli_timeout" gh label create "$label" --repo "$GITHUB_REPOSITORY" --force --color B60205 \
     --description "Unhealthy deployment reported by szczur-radar-monitor" >/dev/null 2>"$work/gh-error" \
     || gh_failed "gh label create $label"

@@ -13,8 +13,9 @@ na Railway. Odpowiada na jedno pytanie: czy usługa po deployu wstała i odpowia
 3. Railway dostaje 2xx dopiero, gdy GitHub przyjął dispatch; inaczej 502 i Railway ponawia.
 4. `verify.yml` czyta z Railway stan wdrożonej usługi, a dla API i weba sonduje `/api/ready`,
    `/healthz` i `/`; kończy się zielono albo czerwono.
-5. Czerwony run otwiera lub komentuje jedno issue `deploy-health` na środowisko i usługę,
-   przypisane do operatora; pierwszy zielony run tej usługi je zamyka.
+5. Na produkcji czerwony run otwiera lub komentuje jedno issue `deploy-health` na usługę,
+   przypisane do operatora, i wysyła alarm do Telegrama; pierwszy zielony run tej usługi zamyka
+   issue. W środowiskach PR sygnałem jest tylko wynik runu (bez issue i bez alarmu).
 
 Monitor tylko czyta stan w Railway i sonduje publiczny origin weba. Niczego nie wdraża i niczego
 nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z szczur-radar.
@@ -62,7 +63,8 @@ ani weba i nie dotyka ich issue.
 
 ## Issue
 
-Jedno otwarte issue na **środowisko i usługę** w tym repo: etykieta `deploy-health`, tytuł
+Tylko produkcja. W środowisku PR run kończy się samym wynikiem (zielony albo czerwony w Actions),
+bez issue i bez alarmu. Na produkcji jedno otwarte issue na **usługę** w tym repo: etykieta `deploy-health`, tytuł
 `Niezdrowe wdrożenie: <środowisko> / <usługa>`, przypisane do `MONITOR_ASSIGNEE` (push w GitHub
 Mobile). Issue jest szukane po `<środowisko> / <usługa>` jako całych słowach, więc
 `szczur-radar-pr-8` nigdy nie pasuje do `szczur-radar-pr-81`.
@@ -84,7 +86,7 @@ Czerwony run środowiska `production` wysyła też zdarzenie do checka healthche
 `production/deploy-health` (kanał alarmowy szczur-radar F-04, checki zakłada `tools/healthchecks/checks.sh`
 w szczur-radar): `/fail` z treścią `DEPLOY_UNHEALTHY (<środowisko> / <usługa>): <stan>; run <link>`
 (`text/plain`, do 1000 znaków), a po 2xx sukces z `ok`. Telegram pokazuje „down” z tą treścią i zaraz
-„up”; stan awarii trzyma issue, nie check. PR envy dają tylko issue. Jedna próba na żądanie (połączenie
+„up”; stan awarii trzyma issue, nie check. PR envy nie dają ani alarmu, ani issue. Jedna próba na żądanie (połączenie
 5 s, żądanie 10 s); błąd healthchecks.io to ostrzeżenie w logu runu i nigdy nie zmienia wyniku. Bez
 sekretu `HEALTHCHECK_PING_URL` alarm nie jest wysyłany.
 
