@@ -16,7 +16,8 @@
 #   RAILWAY_API_TOKEN   a Railway workspace token (read by the railway CLI; never `railway link`)
 #   RAILWAY_PROJECT_ID  the szczur-radar project's ID (a UUID)
 #   READINESS_SERVICES  comma-separated services whose deploy is judged by the environment's readiness
-#                       (default szczur-radar-api,szczur-radar-web); every other service is a cron
+#                       (default szczur-radar-api,szczur-radar-web); every other service (a cron,
+#                       the database) is judged by its deployment state alone
 #   MONITOR_ASSIGNEE    the GitHub login a new issue is assigned to (the push in GitHub Mobile)
 #   GH_TOKEN, GITHUB_REPOSITORY  gh against this monitor repo (issues: write); GITHUB_SERVER_URL and
 #                       GITHUB_RUN_ID give the run link in the report
@@ -34,10 +35,12 @@
 #   QUEUED, WAITING, NEEDS_APPROVAL       answering) after SETTLE_TIMEOUT: RED, "nieweryfikowalne"
 #   SUCCESS, SLEEPING                     OK
 #   no deployment, an unknown state       RED
+#   Railway refusing the token            RED at once, "nieweryfikowalne: token Railway odrzucony"
+#   (Unauthorized)                        (no retry: a refused token does not heal within the window)
 # A readiness service with an OK state is then probed through the web origin, every probe retried
 # within one WAKE_TIMEOUT window: GET /api/ready and GET /healthz must answer 200, GET / 200 with
-# text/html that references /assets/ (the SPA, not only Caddy). A cron is judged by its state alone,
-# without probes. GREEN = an OK state and, for a readiness service, every probe passed.
+# text/html that references /assets/ (the SPA, not only Caddy). Any other service is judged by its state
+# alone, without probes. GREEN = an OK state and, for a readiness service, every probe passed.
 #
 # Issues (label deploy-health, one per environment and service, titled
 # "Niezdrowe wdrożenie: <environment> / <service>", found as whole words, the oldest open one):
@@ -104,8 +107,8 @@ for tool in railway gh jq curl; do
 done
 
 readonly environment=$ENVIRONMENT_NAME service=$SERVICE_NAME
-# The service's class: a readiness service (api, web) or a cron.
-kind=cron
+# The service's class: a readiness service (api, web) or a state service (a cron, the database).
+kind=state
 for readiness_service in "${readiness_services[@]}"; do
     [[ $service != "$readiness_service" ]] || kind=readiness
 done
@@ -138,12 +141,13 @@ readonly run_link
 
 # The service's latest deployment: sets LATEST_ID and LATEST_STATUS (LATEST_ID "none": no deployment
 # but SKIPPED, REMOVED or REMOVING ones). Returns 1, with the reason in the log, when the CLI fails or
-# prints no list of deployments.
+# prints no list of deployments, and 2 when Railway refuses the token (Unauthorized).
 latest() {
     local out
     if ! out=$(railway deployment list --json --limit "$deployment_limit" -s "$service" \
             -p "$RAILWAY_PROJECT_ID" -e "$ENVIRONMENT_ID" 2>"$work/railway-error"); then
         log "verify: railway deployment list -s $service failed: $(head -n 3 "$work/railway-error" | tr '\n' ' ')"
+        ! grep -q Unauthorized "$work/railway-error" || return 2
         return 1
     fi
     # createdAt is ISO 8601 in UTC; fractions of a second are dropped before it is compared.
@@ -170,7 +174,9 @@ last_seen=""
 readonly settle_deadline=$(( SECONDS + settle_timeout ))
 log "verify: $EVENT_TYPE of $service in $environment (deployment $DEPLOYMENT_ID, a $kind service); reading its state in Railway"
 while true; do
-    if latest; then
+    railway_status=0
+    latest || railway_status=$?
+    if (( railway_status == 0 )); then
         last_seen=$LATEST_STATUS
         if [[ $LATEST_ID == none ]]; then
             state=RED state_text="brak deployu"
@@ -194,6 +200,9 @@ while true; do
                 break
                 ;;
         esac
+    elif (( railway_status == 2 )); then
+        state=UNVERIFIABLE state_text="nieweryfikowalne: token Railway odrzucony"
+        break
     else
         last_seen="Railway nie odpowiada"
     fi
@@ -278,7 +287,7 @@ readonly verdict
     fi
     printf '| | |\n| --- | --- |\n'
     printf '| Środowisko | `%s` (`%s`) |\n' "$environment" "$ENVIRONMENT_ID"
-    printf '| Usługa | `%s` (%s) |\n' "$service" "$([[ $kind == readiness ]] && echo 'gotowość środowiska' || echo 'cron: tylko stan deployu')"
+    printf '| Usługa | `%s` (%s) |\n' "$service" "$([[ $kind == readiness ]] && echo 'gotowość środowiska' || echo 'tylko stan deployu, bez sond')"
     printf '| Zdarzenie | `%s`, deploy `%s` |\n' "$EVENT_TYPE" "$DEPLOYMENT_ID"
     printf '| Najnowszy deploy (Railway) | %s |\n' "$deployment_text"
     printf '| Stan deployu | **%s** |\n' "$state_text"
@@ -317,7 +326,7 @@ open_issue() {
 }
 
 if [[ $verdict == GREEN ]]; then
-    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == cron ]] || echo ', every probe passed'))"
+    log "::notice::verify: $environment / $service is healthy ($state_text$([[ $kind == state ]] || echo ', every probe passed'))"
     open_issue
     if [[ -n $ISSUE ]]; then
         {

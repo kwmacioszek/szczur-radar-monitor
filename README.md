@@ -35,6 +35,7 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
    | `FAILED`, `CRASHED` | czerwony |
    | `BUILDING`, `DEPLOYING`, `INITIALIZING`, `QUEUED`, `WAITING`, `NEEDS_APPROVAL` | pytanie co 10 s; po 5 min (`SETTLE_TIMEOUT`) czerwony „nieweryfikowalne” |
    | brak deployu, nieznany stan, Railway nie odpowiada do końca okna | czerwony |
+   | Railway odrzuca token (`Unauthorized`) | od razu czerwony „nieweryfikowalne: token Railway odrzucony”, bez ponowień; wymień token (`SECURITY.md`) |
 
 2. Usługi gotowości (`READINESS_SERVICES`, domyślnie `szczur-radar-api,szczur-radar-web`): po stanie
    OK sondy przez origin weba środowiska (`verifier/web-url.sh`), każda ponawiana w jednym oknie
@@ -42,8 +43,9 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
    - `GET /api/ready` → 200 (API sięga bazy),
    - `GET /healthz` → 200 (Caddy żyje),
    - `GET /` → 200, `text/html` z odwołaniem do `/assets/` (SPA naprawdę serwowane).
-3. Crony (każda inna usługa, np. `pipeline-trigger`, `db-backup`): tylko stan deployu tego crona,
-   bez sond. Run API lub weba nigdy nie czyta stanu cronów, a run crona nie czyta stanu API ani weba.
+3. Każda inna usługa (crony `pipeline-trigger`, `db-backup`, baza `postgres`): tylko stan jej
+   deployu, bez sond. Run API lub weba nigdy nie czyta stanu innych usług, a run innej usługi nie
+   czyta stanu API ani weba.
 
 **Zielony** = stan OK i (dla usługi gotowości) wszystkie sondy przeszły. Inaczej **czerwony**
 (`exit 1`). Błędy po starcie (wyjątki w logach, awarie w ruchu) są poza zakresem. Kody wyjścia

@@ -16,7 +16,8 @@
 #      on the open one; szczur-radar-pr-8 / szczur-radar-api never matches szczur-radar-pr-81 /
 #      szczur-radar-api (nor a pull request); GREEN comments on and closes that service's issue, leaves
 #      another service's open, and without one only reads the list;
-#   4. errors: railway failing (RED, exit 1), gh failing (exit 1), a missing or bad variable (exit 2).
+#   4. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
+#      failing (exit 1), a missing or bad variable (exit 2).
 # Needs bash, jq, curl and python3. Short limits (1–3 s) keep it under a minute or so.
 # Run from anywhere: verifier/test.sh
 set -euo pipefail
@@ -130,7 +131,8 @@ mkdir -p "$tmp/bin"
 # The stub `railway`: answers `railway deployment list --json --limit <n> -s <service> -p <project> -e
 # <environment>` of the project and environment above, with RAILWAY_API_TOKEN set, from
 # $RAILWAY_STUB/<service>, one line per call, the last one repeating: a JSON list of deployments, or
-# "fail" (the CLI fails). A service without a file is unknown (the CLI's error). Every call goes to
+# "fail" (the CLI fails), or "unauthorized" (Railway refuses the token, the CLI's message). A service
+# without a file is unknown (the CLI's error). Every call goes to
 # $RAILWAY_STUB/calls; any other command or option fails with exit 3.
 cat >"$tmp/bin/railway" <<'SH'
 #!/usr/bin/env bash
@@ -161,6 +163,7 @@ if (( $(wc -l <"$answers") > 1 )); then
 fi
 case $answer in
     fail) echo "Failed to fetch: error sending request" >&2; exit 1 ;;
+    unauthorized) echo "Unauthorized. Please check that your RAILWAY_API_TOKEN is valid and has access to the resource you're trying to use." >&2; exit 1 ;;
     *) printf '%s\n' "$answer" ;;
 esac
 SH
@@ -366,7 +369,7 @@ railway_answers cron-crashed szczur-radar-api "$(only a1 FAILED)"
 verify_case cron-crashed 1 "" SERVICE_NAME=pipeline-trigger EVENT_TYPE=Deployment.crashed
 web_requests_were cron-crashed 0
 railway_asked_only cron-crashed pipeline-trigger
-out_says cron-crashed '| Usługa | `pipeline-trigger` (cron: tylko stan deployu) |'
+out_says cron-crashed '| Usługa | `pipeline-trigger` (tylko stan deployu, bez sond) |'
 out_says cron-crashed '| Stan deployu | **CRASHED** |'
 ! grep -qF '| Sonda |' "$tmp/cron-crashed.out" || { show_run cron-crashed; die "cron-crashed: the report has probes"; }
 railway_answers cron-success db-backup "$(only b1 SUCCESS)"
@@ -505,6 +508,16 @@ run_says railway-garbage 'printed no list of deployments'
 railway_answers railway-recovers szczur-radar-api fail "$(only a1 SUCCESS)"
 verify_case railway-recovers 0 ""
 pass "railway failing or printing no list until SETTLE_TIMEOUT: RED, unverifiable, exit 1; failing once: retried"
+
+# A refused token never heals within the window: one question, RED at once, no "Railway nie odpowiada".
+railway_answers railway-unauthorized szczur-radar-api unauthorized "$(only a1 SUCCESS)"
+verify_case railway-unauthorized 1 "" SETTLE_TIMEOUT=30s
+(( $(wc -l <"$tmp/railway-unauthorized.railway/calls") == 1 )) \
+    || { show_run railway-unauthorized; die "railway-unauthorized: railway asked more than once"; }
+out_says railway-unauthorized '| Stan deployu | **nieweryfikowalne: token Railway odrzucony** |'
+gh_calls_are railway-unauthorized "label create deploy-health" "$list_call" "issue create "
+web_requests_were railway-unauthorized 0
+pass "Railway refusing the token: RED at once (one question, no retry), the issue says so"
 
 railway_answers gh-fails-red szczur-radar-api "$(only a2 FAILED)"
 mkdir -p "$tmp/gh-fails-red.gh"
