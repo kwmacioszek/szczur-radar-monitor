@@ -18,7 +18,8 @@
 #      szczur-radar-api (nor a pull request); GREEN comments on and closes that service's issue, leaves
 #      another service's open, and without one only reads the list;
 #   4. errors: railway failing (RED, exit 1), Railway refusing the token (RED at once, no retry), gh
-#      failing (exit 1), a missing or bad variable (exit 2).
+#      failing (exit 1), a hung railway or gh call stopped after CLI_TIMEOUT, a missing or bad variable
+#      (exit 2).
 # Needs bash, jq, curl and python3. Short limits (1–3 s) keep it under a minute or so.
 # Run from anywhere: verifier/test.sh
 set -euo pipefail
@@ -132,7 +133,8 @@ mkdir -p "$tmp/bin"
 # The stub `railway`: answers `railway deployment list --json --limit <n> -s <service> -p <project> -e
 # <environment>` of the project and environment above, with RAILWAY_API_TOKEN set, from
 # $RAILWAY_STUB/<service>, one line per call, the last one repeating: a JSON list of deployments, or
-# "fail" (the CLI fails), or "unauthorized" (Railway refuses the token, the CLI's message). A service
+# "fail" (the CLI fails), "unauthorized" (Railway refuses the token, the CLI's message) or "hang" (no
+# answer within the test's CLI_TIMEOUT). A service
 # without a file is unknown (the CLI's error). Every call goes to
 # $RAILWAY_STUB/calls; any other command or option fails with exit 3.
 cat >"$tmp/bin/railway" <<'SH'
@@ -164,6 +166,7 @@ if (( $(wc -l <"$answers") > 1 )); then
 fi
 case $answer in
     fail) echo "Failed to fetch: error sending request" >&2; exit 1 ;;
+    hang) sleep 30 ;;
     unauthorized) echo "Unauthorized. Please check that your RAILWAY_API_TOKEN is valid and has access to the resource you're trying to use." >&2; exit 1 ;;
     *) printf '%s\n' "$answer" ;;
 esac
@@ -171,7 +174,8 @@ SH
 chmod +x "$tmp/bin/railway"
 
 # The stub `gh`: every call goes to $GH_STUB/calls (one line of arguments) and the file of --body-file
-# to $GH_STUB/body; $GH_STUB/fail makes every call fail (as gh does without a valid token).
+# to $GH_STUB/body; $GH_STUB/fail makes every call fail (as gh does without a valid token), $GH_STUB/hang
+# makes every call hang.
 # `api repos/<repo>/issues?…` prints $GH_STUB/issues ([] without it); `issue create` and `issue
 # comment` print a URL, as gh does. Any other command, or a call without GH_TOKEN, fails with exit 3.
 cat >"$tmp/bin/gh" <<'SH'
@@ -183,6 +187,7 @@ for (( i = 0; i < ${#args[@]}; i++ )); do
     [[ ${args[i]} != --body-file ]] || cp "${args[i + 1]}" "$GH_STUB/body"
 done
 [[ -n ${GH_TOKEN:-} ]] || { echo "stub gh: no GH_TOKEN" >&2; exit 3; }
+[[ ! -f $GH_STUB/hang ]] || sleep 30
 [[ ! -f $GH_STUB/fail ]] || { echo "HTTP 401: Bad credentials (https://api.github.com/graphql)" >&2; exit 1; }
 case "${1:-} ${2:-}" in
     "label create" | "issue close") ;;
@@ -298,6 +303,7 @@ run_verify() {
     env -u EVENT_TYPE -u ENVIRONMENT_ID -u ENVIRONMENT_NAME -u SERVICE_NAME -u DEPLOYMENT_ID \
         -u RAILWAY_API_TOKEN -u RAILWAY_PROJECT_ID -u READINESS_SERVICES -u MONITOR_ASSIGNEE -u GH_TOKEN \
         -u GITHUB_REPOSITORY -u GITHUB_RUN_ID -u WAKE_TIMEOUT -u SETTLE_TIMEOUT -u SETTLE_INTERVAL -u WEB_URL \
+        -u CLI_TIMEOUT \
         PATH="$tmp/bin:$PATH" RAILWAY_STUB="$tmp/$name.railway" GH_STUB="$tmp/$name.gh" \
         STUB_PROJECT_ID=$project_id STUB_ENVIRONMENT_ID=$environment_id \
         EVENT_TYPE=Deployment.deployed ENVIRONMENT_ID=$environment_id ENVIRONMENT_NAME=szczur-radar-pr-8 \
@@ -546,6 +552,17 @@ touch "$tmp/gh-fails-green.gh/fail"
 verify_case gh-fails-green 1 ""
 run_says gh-fails-green "::error::verify: gh api repos/$repo/issues failed"
 pass "gh failing (RED, or GREEN reading the issues): exit 1"
+
+# A hung CLI call is stopped after CLI_TIMEOUT: railway as "Railway nie odpowiada", gh as a failed call.
+railway_answers railway-hangs szczur-radar-api hang
+verify_case railway-hangs 1 "" CLI_TIMEOUT=1s SETTLE_TIMEOUT=2s
+out_says railway-hangs '| Stan deployu | **nieweryfikowalne: Railway nie odpowiada** |'
+railway_answers gh-hangs szczur-radar-api "$(only a2 FAILED)"
+mkdir -p "$tmp/gh-hangs.gh"
+touch "$tmp/gh-hangs.gh/hang"
+verify_case gh-hangs 1 "" CLI_TIMEOUT=1s
+run_says gh-hangs '::error::verify: gh label create deploy-health failed'
+pass "a hung railway or gh call stopped after CLI_TIMEOUT: RED (Railway nie odpowiada) or exit 1"
 
 for case in \
     "no-event EVENT_TYPE=" \

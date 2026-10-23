@@ -24,6 +24,26 @@ web_origin() {
     REPLY=${1%/}
 }
 
+# Runs "$@" for at most $1 seconds (macOS has no coreutils `timeout`, and the tests run there too):
+# its exit code, or 124 when the limit ran out and it was stopped. It gets no stdin; its stdout and
+# stderr are the caller's.
+limited() {
+    local limit=$1 pid watcher status=0
+    shift
+    "$@" </dev/null &
+    pid=$!
+    { sleep "$limit"; kill -TERM "$pid"; } >/dev/null 2>&1 &
+    watcher=$!
+    wait "$pid" || status=$?
+    if kill -0 "$watcher" 2>/dev/null; then
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+    elif (( status != 0 )); then
+        status=124
+    fi
+    return "$status"
+}
+
 # Between attempts while the API wakes or restarts (the same pause as szczur-radar's pipeline-trigger).
 # shellcheck disable=SC2034 # used by the sourcing script
 readonly WAKE_INTERVAL=2

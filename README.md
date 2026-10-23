@@ -37,7 +37,7 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
    | `SUCCESS`, `SLEEPING` | OK |
    | `FAILED`, `CRASHED` | czerwony |
    | `BUILDING`, `DEPLOYING`, `INITIALIZING`, `QUEUED`, `WAITING`, `NEEDS_APPROVAL` | pytanie co 10 s; po 5 min (`SETTLE_TIMEOUT`) czerwony „nieweryfikowalne” |
-   | brak deployu, nieznany stan, Railway nie odpowiada do końca okna | czerwony |
+   | brak deployu, nieznany stan, Railway nie odpowiada do końca okna (wywołanie `railway` albo `gh` dłuższe niż 60 s, `CLI_TIMEOUT`, liczy się jako nieudane) | czerwony |
    | Railway odrzuca token (`Unauthorized`) | od razu czerwony „nieweryfikowalne: token Railway odrzucony”, bez ponowień; wymień token (`SECURITY.md`) |
 
 2. Usługi gotowości (`READINESS_SERVICES`, domyślnie `szczur-radar-api,szczur-radar-web`): po stanie

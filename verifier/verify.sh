@@ -24,6 +24,7 @@
 #   SETTLE_TIMEOUT      how long a transient state is polled for (default 5m; durations: 30s, 3m, 2h)
 #   SETTLE_INTERVAL     between the questions to Railway (default 10s)
 #   WAKE_TIMEOUT        how long the probes are retried once the state is OK (default 3m)
+#   CLI_TIMEOUT         the limit of one railway or gh call (default 60s; a hung call counts as failed)
 #   WEB_URL             optional, for tests and manual use only (the workflow never sets it): the web
 #                       origin to probe instead of web-url.sh's
 #
@@ -100,10 +101,11 @@ for service in "${readiness_list[@]}"; do
 done
 (( ${#readiness_services[@]} > 0 )) || usage_error "READINESS_SERVICES names no service"
 
-: "${SETTLE_TIMEOUT:=5m}" "${SETTLE_INTERVAL:=10s}" "${WAKE_TIMEOUT:=3m}"
+: "${SETTLE_TIMEOUT:=5m}" "${SETTLE_INTERVAL:=10s}" "${WAKE_TIMEOUT:=3m}" "${CLI_TIMEOUT:=60s}"
 duration_seconds SETTLE_TIMEOUT; readonly settle_timeout=$REPLY
 duration_seconds SETTLE_INTERVAL; readonly settle_interval=$REPLY
 duration_seconds WAKE_TIMEOUT; readonly wake_timeout=$REPLY
+duration_seconds CLI_TIMEOUT; readonly cli_timeout=$REPLY
 for tool in railway gh jq curl; do
     command -v "$tool" >/dev/null || usage_error "$tool is not installed"
 done
@@ -146,7 +148,7 @@ readonly run_link
 # prints no list of deployments, and 2 when Railway refuses the token (Unauthorized).
 latest() {
     local out
-    if ! out=$(railway deployment list --json --limit "$deployment_limit" -s "$service" \
+    if ! out=$(limited "$cli_timeout" railway deployment list --json --limit "$deployment_limit" -s "$service" \
             -p "$RAILWAY_PROJECT_ID" -e "$ENVIRONMENT_ID" 2>"$work/railway-error"); then
         log "verify: railway deployment list -s $service failed: $(head -n 3 "$work/railway-error" | tr '\n' ' ')"
         ! grep -q Unauthorized "$work/railway-error" || return 2
@@ -316,7 +318,7 @@ gh_failed() {
 # also returns pull requests.
 open_issue() {
     local issues
-    issues=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=$label&state=open&per_page=100" \
+    issues=$(limited "$cli_timeout" gh api "repos/$GITHUB_REPOSITORY/issues?labels=$label&state=open&per_page=100" \
         2>"$work/gh-error") || gh_failed "gh api repos/$GITHUB_REPOSITORY/issues"
     # "<environment> / <service>" as whole words: szczur-radar-pr-8 must not match szczur-radar-pr-81
     # (both names are [a-z0-9-], so they need no regex escaping).
@@ -337,9 +339,9 @@ if [[ $verdict == GREEN ]]; then
             printf 'Zielone po deployu `%s`: zamykam.\n\n' "$DEPLOYMENT_ID"
             cat "$work/report.md"
         } >"$work/comment.md"
-        gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/comment.md" >/dev/null \
+        limited "$cli_timeout" gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/comment.md" >/dev/null \
             2>"$work/gh-error" || gh_failed "gh issue comment $ISSUE"
-        gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>"$work/gh-error" \
+        limited "$cli_timeout" gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>"$work/gh-error" \
             || gh_failed "gh issue close $ISSUE"
         log "::notice::verify: closed the issue #$ISSUE of $environment / $service"
     fi
@@ -348,16 +350,16 @@ if [[ $verdict == GREEN ]]; then
 fi
 
 log "::error::verify: $environment / $service is unhealthy after $EVENT_TYPE (deployment $DEPLOYMENT_ID): $state_text"
-gh label create "$label" --repo "$GITHUB_REPOSITORY" --force --color B60205 \
+limited "$cli_timeout" gh label create "$label" --repo "$GITHUB_REPOSITORY" --force --color B60205 \
     --description "Unhealthy deployment reported by szczur-radar-monitor" >/dev/null 2>"$work/gh-error" \
     || gh_failed "gh label create $label"
 open_issue
 if [[ -n $ISSUE ]]; then
-    url=$(gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/report.md" 2>"$work/gh-error") \
+    url=$(limited "$cli_timeout" gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$work/report.md" 2>"$work/gh-error") \
         || gh_failed "gh issue comment $ISSUE"
     log "::notice::verify: commented on the open issue #$ISSUE: $url"
 else
-    url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title_prefix$environment / $service" \
+    url=$(limited "$cli_timeout" gh issue create --repo "$GITHUB_REPOSITORY" --title "$title_prefix$environment / $service" \
         --label "$label" --assignee "$MONITOR_ASSIGNEE" --body-file "$work/report.md" 2>"$work/gh-error") \
         || gh_failed "gh issue create"
     log "::notice::verify: opened $url"
