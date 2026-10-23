@@ -8,7 +8,8 @@
 #   2. the verdict: a readiness service SUCCESS / SLEEPING with every probe passing (GREEN); FAILED while
 #      the old version still serves (RED); a web deploy while a cron is CRASHED (GREEN, the cron never
 #      read); a cron CRASHED or SUCCESS (no probe); DEPLOYING → SUCCESS or → FAILED; a transient state
-#      until SETTLE_TIMEOUT (RED, unverifiable); SKIPPED and REMOVED rows with a newer createdAt
+#      until SETTLE_TIMEOUT (RED, unverifiable); a newer deploy WAITING / QUEUED / NEEDS_APPROVAL that
+#      is not the webhook's skipped (the serving one judged); SKIPPED and REMOVED rows with a newer createdAt
 #      ignored, the list sorted by createdAt; no deployment; an unknown state; /api/ready 503 for the
 #      whole window (RED) or until it wakes (GREEN); GET / without text/html or without /assets/ (RED);
 #      an environment without a known web address (RED);
@@ -386,13 +387,27 @@ verify_case settles-red 1 ""
 out_says settles-red '| Stan deployu | **FAILED** |'
 pass "DEPLOYING, then SUCCESS: GREEN; BUILDING, DEPLOYING, then FAILED: RED"
 
+# The webhook's own deployment (a redeploy may still be queued); INITIALIZING counts whoever's it is.
 for status in QUEUED WAITING NEEDS_APPROVAL INITIALIZING; do
-    railway_answers "transient-$status" szczur-radar-api "$(only a2 "$status")"
+    railway_answers "transient-$status" szczur-radar-api "$(only "$deployment_id" "$status")"
     verify_case "transient-$status" 1 "" SETTLE_TIMEOUT=2s
     out_says "transient-$status" "| Stan deployu | **nieweryfikowalne: $status** |"
     web_requests_were "transient-$status" 0
 done
 pass "a transient state (QUEUED, WAITING, NEEDS_APPROVAL, INITIALIZING) until SETTLE_TIMEOUT: RED, unverifiable"
+
+# A later push's deploy waiting for CI (or queued) is not the webhook's: the one serving is judged.
+for status in WAITING QUEUED NEEDS_APPROVAL; do
+    railway_answers "newer-$status" szczur-radar-api "$(deployments \
+        "a9 $status 2026-10-20T11:00:00.000Z" "$deployment_id SUCCESS 2026-10-20T10:00:00.000Z")"
+    verify_case "newer-$status" 0 ""
+    out_says "newer-$status" '| Stan deployu | **SUCCESS** |'
+done
+railway_answers newer-waiting-failed szczur-radar-api "$(deployments \
+    "a9 WAITING 2026-10-20T11:00:00.000Z" "$deployment_id FAILED 2026-10-20T10:00:00.000Z")"
+verify_case newer-waiting-failed 1 ""
+out_says newer-waiting-failed '| Stan deployu | **FAILED** |'
+pass "a newer deploy WAITING / QUEUED / NEEDS_APPROVAL (not the webhook's) skipped: the serving one judged"
 
 # Not sorted on purpose: the newest by createdAt, whatever the order, and SKIPPED / REMOVED / REMOVING
 # rows (which carry a newer commit) do not count.

@@ -29,7 +29,9 @@
 #
 # The verdict, from `railway deployment list --json -s <SERVICE_NAME>` in the environment only (the
 # state of another service is never read): the latest deployment is the newest by createdAt, skipping
-# SKIPPED, REMOVED and REMOVING.
+# SKIPPED, REMOVED and REMOVING, and skipping WAITING, QUEUED and NEEDS_APPROVAL unless it is the
+# webhook's DEPLOYMENT_ID: a later push's deploy that has not started (e.g. waiting for CI) does not
+# replace the one serving, and its own final webhook gives its own run.
 #   FAILED, CRASHED                       RED
 #   BUILDING, DEPLOYING, INITIALIZING,    polled every SETTLE_INTERVAL; still transient (or Railway not
 #   QUEUED, WAITING, NEEDS_APPROVAL       answering) after SETTLE_TIMEOUT: RED, "nieweryfikowalne"
@@ -151,13 +153,15 @@ latest() {
         return 1
     fi
     # createdAt is ISO 8601 in UTC; fractions of a second are dropped before it is compared.
-    if ! out=$(jq -r '
+    if ! out=$(jq -r --arg webhook "$DEPLOYMENT_ID" '
             def created: .createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601;
             if type != "array" then error("not a list") else
                 map(if type == "object" and (.id | type) == "string" and (.status | type) == "string"
                         and (.createdAt | type) == "string"
                     then . else error("not a deployment") end)
                 | map(select(.status as $status | ["SKIPPED", "REMOVED", "REMOVING"] | index($status) | not))
+                | map(select(.id == $webhook
+                    or (.status as $status | ["WAITING", "QUEUED", "NEEDS_APPROVAL"] | index($status) | not)))
                 | map(. + {created: created})
                 | if length == 0 then "none -" else (max_by(.created) | "\(.id) \(.status)") end
             end' <<<"$out" 2>/dev/null); then

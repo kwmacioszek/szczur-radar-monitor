@@ -27,7 +27,10 @@ nie zmienia w szczur-radar; nie zastępuje deploy guarda ani reguły no-merge z 
 
 1. Stan: `railway deployment list --json -s <usługa>` w danym środowisku (token workspace,
    `RAILWAY_PROJECT_ID` + ID środowiska, nigdy `railway link`). Liczy się najnowszy deploy wg
-   `createdAt` poza `SKIPPED`, `REMOVED` i `REMOVING`.
+   `createdAt` poza `SKIPPED`, `REMOVED` i `REMOVING`. Nowszy deploy `WAITING`, `QUEUED` albo
+   `NEEDS_APPROVAL` (np. kolejny push czekający na CI) też się nie liczy, chyba że to deploy
+   z webhooka: jeszcze nie wystartował, więc ocenia się ten, który działa, a jego własny webhook
+   da osobny run.
 
    | Stan | Wynik |
    | --- | --- |
