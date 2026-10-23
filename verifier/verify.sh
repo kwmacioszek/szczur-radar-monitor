@@ -25,6 +25,8 @@
 #   SETTLE_INTERVAL     between the questions to Railway (default 10s)
 #   WAKE_TIMEOUT        how long the probes are retried once the state is OK (default 3m)
 #   CLI_TIMEOUT         the limit of one railway or gh call (default 60s; a hung call counts as failed)
+#   HEALTHCHECK_PING_URL  optional secret: the ping URL of the healthchecks.io check production/deploy-health
+#                       (szczur-radar F-04, which alerts in Telegram); without it no alert is sent
 #   WEB_URL             optional, for tests and manual use only (the workflow never sets it): the web
 #                       origin to probe instead of web-url.sh's
 #
@@ -52,6 +54,11 @@
 #          one only the list of open issues is read.
 # The log goes to stderr (GitHub `::error::` / `::notice::` lines), the markdown report to stdout.
 # No secret is printed.
+# A red run of production also alerts the operator through healthchecks.io, as szczur-radar's
+# alerts/HealthchecksAlerts (F-04) does: a /fail with "DEPLOY_UNHEALTHY (<environment> / <service>):
+# <state>; run <link>" (text/plain, at most 1000 characters, what Telegram shows) to HEALTHCHECK_PING_URL,
+# then after a 2xx a success with "ok", so the next alert flips the check again. The check's state is not
+# the service's (the issue is). healthchecks.io failing never changes the verdict or the exit code.
 # Exit codes: 0 GREEN, 1 RED (unverifiable, Railway failing and a failed gh call included), 2 a bad
 # invocation or variable.
 set -euo pipefail
@@ -106,6 +113,14 @@ duration_seconds SETTLE_TIMEOUT; readonly settle_timeout=$REPLY
 duration_seconds SETTLE_INTERVAL; readonly settle_interval=$REPLY
 duration_seconds WAKE_TIMEOUT; readonly wake_timeout=$REPLY
 duration_seconds CLI_TIMEOUT; readonly cli_timeout=$REPLY
+# The ping URL goes into a curl config between double quotes: no quote, backslash, space or control
+# character. It is a secret (whoever knows it can check in), so it is never printed.
+if [[ -n ${HEALTHCHECK_PING_URL:-} ]]; then
+    ping_pattern='^https?://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+$'
+    [[ $HEALTHCHECK_PING_URL =~ $ping_pattern ]] \
+        || usage_error "HEALTHCHECK_PING_URL must be the http(s) ping URL of a healthchecks.io check"
+fi
+readonly alert_environment=production
 for tool in railway gh jq curl; do
     command -v "$tool" >/dev/null || usage_error "$tool is not installed"
 done
@@ -304,6 +319,37 @@ readonly verdict
         printf '%s\n' "${probe_rows[@]}"
     fi
 } >"$work/report.md"
+
+# --- The operator's alert (healthchecks.io, production only) ----------------------------------------
+
+# One check-in, one attempt: $1 the suffix of the ping URL ("/fail" or ""), $2 the body file. Sets REPLY
+# to the HTTP status (000: no answer) and returns 1 unless it is 2xx. The URL goes to curl as a config on
+# stdin, never as an argument; connect 5 s, the request 10 s, as in F-04.
+check_in() {
+    REPLY=$(curl --disable --silent --show-error --output /dev/null --write-out '%{http_code}' \
+        --connect-timeout 5 --max-time 10 --header 'Content-Type: text/plain; charset=utf-8' \
+        --data-binary "@$2" --config - 2>"$work/ping-error" \
+        <<<"url = \"${HEALTHCHECK_PING_URL%/}$1\"") || REPLY=000
+    [[ $REPLY =~ ^2[0-9][0-9]$ ]]
+}
+
+if [[ $verdict == RED && $environment == "$alert_environment" ]]; then
+    if [[ -z ${HEALTHCHECK_PING_URL:-} ]]; then
+        log "::notice::verify: no HEALTHCHECK_PING_URL, no healthchecks.io alert"
+    else
+        alert="DEPLOY_UNHEALTHY ($environment / $service): $state_text; run $run_link"
+        (( ${#alert} <= 1000 )) || alert="${alert:0:999}…"
+        printf '%s' "$alert" >"$work/alert.txt"
+        printf 'ok' >"$work/ok.txt"
+        if ! check_in /fail "$work/alert.txt"; then
+            log "::warning::verify: the healthchecks.io alert was not delivered (HTTP $REPLY to the failure ping; the verdict stands)"
+        elif ! check_in "" "$work/ok.txt"; then
+            log "::warning::verify: the healthchecks.io alert went out, but HTTP $REPLY to the success ping: the check may stay down, so the next alert may send nothing"
+        else
+            log "::notice::verify: alerted the operator through healthchecks.io"
+        fi
+    fi
+fi
 
 # --- The issue of this environment and service ----------------------------------------------------
 

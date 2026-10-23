@@ -78,6 +78,16 @@ Zielony deploy weba nie zamyka issue API ani crona. Runy jednego środowiska id�
 (`concurrency` `env-<id środowiska>`, `queue: max`, bez `cancel-in-progress`), więc issue nie ściga
 się samo ze sobą; duplikaty webhooków dają po prostu kolejny run z tym samym wynikiem.
 
+## Alarm w Telegramie (tylko produkcja)
+
+Czerwony run środowiska `production` wysyła też zdarzenie do checka healthchecks.io
+`production/deploy-health` (kanał alarmowy szczur-radar F-04, checki zakłada `tools/healthchecks/checks.sh`
+w szczur-radar): `/fail` z treścią `DEPLOY_UNHEALTHY (<środowisko> / <usługa>): <stan>; run <link>`
+(`text/plain`, do 1000 znaków), a po 2xx sukces z `ok`. Telegram pokazuje „down” z tą treścią i zaraz
+„up”; stan awarii trzyma issue, nie check. PR envy dają tylko issue. Jedna próba na żądanie (połączenie
+5 s, żądanie 10 s); błąd healthchecks.io to ostrzeżenie w logu runu i nigdy nie zmienia wyniku. Bez
+sekretu `HEALTHCHECK_PING_URL` alarm nie jest wysyłany.
+
 ## Ograniczenia
 
 - Railway wysyła webhooki best-effort. Zgubiony webhook albo przepełnienie kolejki środowiska
